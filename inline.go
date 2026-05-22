@@ -109,7 +109,15 @@ func flattenCall(
 	// would produce a broken Terraform configuration that only fails at
 	// `terraform plan` time with a less actionable message.
 	vars := map[string]hclwrite.Tokens{}
-	for name, def := range lm.variables {
+	// Iterate variables in sorted name order so the "required variable
+	// missing" diagnostic is deterministic when more than one is absent.
+	varNames := make([]string, 0, len(lm.variables))
+	for name := range lm.variables {
+		varNames = append(varNames, name)
+	}
+	sort.Strings(varNames)
+	for _, name := range varNames {
+		def := lm.variables[name]
 		if arg, ok := mc.args[name]; ok {
 			vars[name] = arg
 		} else if def != nil {

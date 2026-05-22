@@ -505,6 +505,26 @@ func TestFlatten_DynamicBlock(t *testing.T) {
 		"ingress.value reference inside content is preserved")
 }
 
+func TestFlatten_ParentDuplicateAddress_SameFile(t *testing.T) {
+	// Both occurrences are in the same file. Each must report its own
+	// line — not point at the first match twice.
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/parent_dup_same_file"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "declared twice in the parent")
+	assert.Contains(t, msg, "main.tf:1:1", "first occurrence at line 1")
+	assert.Contains(t, msg, "main.tf:5:1", "second occurrence at line 5")
+}
+
+func TestFlatten_MissingMultipleVars_DeterministicOrder(t *testing.T) {
+	// Three required vars are missing. The diagnostic reports them in
+	// sorted name order: `alpha` first regardless of map iteration order.
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/missing_multiple_vars"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `required variable "alpha"`,
+		"sort order is deterministic: alpha < mike < zulu, so alpha errors first")
+}
+
 func TestFlatten_ParentDuplicateAddress(t *testing.T) {
 	// Two parent files declare the same resource address. Terraform itself
 	// would reject this; tflat surfaces it up front with both locations.

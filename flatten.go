@@ -382,17 +382,29 @@ func (o addrOwner) String() string {
 func checkAddressCollisions(rootFiles []*parsedFile, pending []*pendingCall) error {
 	owner := map[string]addrOwner{}
 	for _, pf := range rootFiles {
-		for _, b := range pf.file.Body().Blocks() {
-			if b.Type() != "resource" && b.Type() != "data" {
+		if pf.syntax == nil {
+			continue
+		}
+		// Walk hclsyntax (not hclwrite) so each block carries its own
+		// SrcRange. Using findBlockRange would return the *first* match
+		// in the file for every duplicate, hiding the second's true
+		// location.
+		for _, blk := range pf.syntax.Blocks {
+			if blk.Type != "resource" && blk.Type != "data" {
 				continue
 			}
-			addr := resourceAddr(b)
-			if addr == "" {
+			if len(blk.Labels) != 2 {
 				continue
+			}
+			var addr string
+			if blk.Type == "data" {
+				addr = "data." + blk.Labels[0] + "." + blk.Labels[1]
+			} else {
+				addr = blk.Labels[0] + "." + blk.Labels[1]
 			}
 			entry := addrOwner{
 				desc: "parent file " + pf.name,
-				loc:  findBlockRange(pf, b.Type(), b.Labels()),
+				loc:  blk.DefRange(),
 			}
 			if prev, ok := owner[addr]; ok {
 				return fmt.Errorf(
