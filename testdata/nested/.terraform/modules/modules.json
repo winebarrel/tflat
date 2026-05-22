@@ -1,0 +1,7 @@
+{
+  "Modules": [
+    { "Key": "", "Source": "", "Dir": "." },
+    { "Key": "outer", "Source": "./modules/outer", "Dir": "modules/outer" },
+    { "Key": "outer.inner", "Source": "./inner", "Dir": "modules/outer/inner" }
+  ]
+}
