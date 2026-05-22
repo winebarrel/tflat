@@ -1,6 +1,7 @@
 package tflat
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -10,13 +11,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
-
-// TestParentReferencesModules_NilModules exercises the early-return branch
-// for when the rewriter has no modules map at all.
-func TestParentReferencesModules_NilModules(t *testing.T) {
-	got := parentReferencesModules(&parsedFile{}, &rewriter{})
-	assert.Nil(t, got)
-}
 
 // TestFindAttrRange_Variants covers the per-branch behaviour of
 // findAttrRange when called with mismatching labels / missing attribute.
@@ -72,6 +66,112 @@ func TestParseDir_FileReadError(t *testing.T) {
 	_, err := parseDir(tmp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "read ")
+}
+
+// TestResourceAddr_BadLabels covers the defensive empty-string return when
+// resourceAddr sees a block with the wrong number of labels.
+func TestResourceAddr_BadLabels(t *testing.T) {
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "x.tf"),
+		[]byte(`resource "x" {}`), 0644))
+	files, err := parseDir(tmp)
+	require.NoError(t, err)
+	for _, b := range files[0].file.Body().Blocks() {
+		if b.Type() == "resource" {
+			assert.Empty(t, resourceAddr(b))
+		}
+	}
+}
+
+// TestCheckAddressCollisions_IgnoresMalformed verifies that malformed
+// resource/data blocks (wrong label count) are skipped by the collision
+// check rather than crashing it.
+func TestCheckAddressCollisions_IgnoresMalformed(t *testing.T) {
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "x.tf"),
+		// One-label resource and a label-less data block: both have an
+		// empty resourceAddr() result and must be skipped.
+		[]byte("resource \"x\" {}\ndata {}\n"), 0644))
+	files, err := parseDir(tmp)
+	require.NoError(t, err)
+	require.NoError(t, checkAddressCollisions(files, nil))
+}
+
+func TestPathInside(t *testing.T) {
+	assert.True(t, pathInside("/a/b", "/a/b"), "identical paths are 'inside'")
+	assert.True(t, pathInside("/a/b", "/a/b/c"))
+	assert.False(t, pathInside("/a/b", "/a/bx"), "prefix-only must not match")
+	assert.False(t, pathInside("/a/b", "/a"))
+	assert.False(t, pathInside("/a/b", "/c/d"), "unrelated siblings")
+
+	// Filesystem root: a naive HasPrefix(child, parent+sep) check would
+	// build "//" and reject every absolute path. The Rel-based
+	// implementation handles this correctly.
+	assert.True(t, pathInside("/", "/foo"))
+	assert.True(t, pathInside("/", "/"))
+}
+
+// errWriter always errors; used to exercise WriteToStdout's error returns.
+type errWriter struct{}
+
+func (errWriter) Write(p []byte) (int, error) {
+	return 0, errBoom
+}
+
+// errAfterN succeeds on the first n writes and errors on the (n+1)th.
+// Used to walk past WriteToStdout's banner/content writes and reach the
+// per-iteration error branches that errWriter can't reach.
+type errAfterN struct{ remaining int }
+
+func (e *errAfterN) Write(p []byte) (int, error) {
+	if e.remaining <= 0 {
+		return 0, errBoom
+	}
+	e.remaining--
+	return len(p), nil
+}
+
+var errBoom = errors.New("boom")
+
+// TestResult_WriteToStdout_ErrorMidStream covers the Fprintln/Fprintf
+// error branches inside WriteToStdout that fire on the *second* file.
+func TestResult_WriteToStdout_ErrorMidStream(t *testing.T) {
+	res := &Result{Files: []FileOutput{
+		{Path: "a.tf", Content: []byte("a")},
+		{Path: "b.tf", Content: []byte("b")},
+	}}
+	// The first file needs: one banner Fprintf + one content Write = 2 ok
+	// writes. The Fprintln blank line between files is the 3rd write.
+	err := res.WriteToStdout(&errAfterN{remaining: 2})
+	require.Error(t, err)
+
+	// Push further: succeed through the second file's banner Fprintf and
+	// fail at its content w.Write — covers the final error branch.
+	err = res.WriteToStdout(&errAfterN{remaining: 4})
+	require.Error(t, err)
+}
+
+func TestAddrOwnerString(t *testing.T) {
+	withLoc := addrOwner{
+		desc: "parent file main.tf",
+		loc:  hcl.Range{Filename: "main.tf", Start: hcl.Pos{Line: 3, Column: 1}},
+	}
+	assert.Equal(t, "parent file main.tf at main.tf:3:1", withLoc.String())
+
+	withoutLoc := addrOwner{desc: "parent file main.tf"}
+	assert.Equal(t, "parent file main.tf", withoutLoc.String())
+}
+
+// TestResult_WriteToStdout_WriterError covers the WriteToStdout error
+// branches. Passing a writer that always fails surfaces the first error
+// up.
+func TestResult_WriteToStdout_WriterError(t *testing.T) {
+	res := &Result{Files: []FileOutput{
+		{Path: "a.tf", Content: []byte("x")},
+		{Path: "b.tf", Content: []byte("y")},
+	}}
+	err := res.WriteToStdout(errWriter{})
+	require.Error(t, err)
 }
 
 // TestCollectMovedForCall_LoadModuleError covers the loadModule error path
@@ -171,7 +271,7 @@ func TestCloneAndRewriteResource_BadLabels(t *testing.T) {
 		}
 	}
 	require.NotNil(t, bad)
-	_, err = cloneAndRewriteResource(bad, "p", &moduleCall{}, &rewriter{}, files[0])
+	_, err = mutateResource(bad, "p", &moduleCall{}, &rewriter{}, files[0])
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected resource block labels")
 }

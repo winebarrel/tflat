@@ -3,9 +3,14 @@ package tflat
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 )
 
@@ -20,6 +25,84 @@ type Result struct {
 type FileOutput struct {
 	Path    string
 	Content []byte
+}
+
+// pendingCall pairs a module call with the flattened result we produced
+// for it. Hoisted to file scope so checkAddressCollisions can take it.
+type pendingCall struct {
+	mc   *moduleCall
+	flat *flattened
+}
+
+// WriteToDir writes each file in the result into dir using its relative
+// path. When overwriting an existing file the original permission bits
+// are preserved; new files are created with 0644.
+//
+// FileOutput.Path is treated as a relative path inside dir. Absolute
+// paths and paths that escape dir (via `..`) are rejected to prevent a
+// crafted Result from writing outside the target directory.
+func (r *Result) WriteToDir(dir string) error {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
+	for _, f := range r.Files {
+		if filepath.IsAbs(f.Path) {
+			return fmt.Errorf("WriteToDir: refusing absolute path %q", f.Path)
+		}
+		path := filepath.Join(absDir, f.Path)
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if !pathInside(absDir, absPath) {
+			return fmt.Errorf("WriteToDir: path %q escapes target directory", f.Path)
+		}
+		mode := os.FileMode(0644)
+		if info, err := os.Stat(absPath); err == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := os.WriteFile(absPath, f.Content, mode); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// pathInside reports whether child is the same as parent or sits below it.
+// Both paths must already be absolute and cleaned (filepath.Abs does both).
+//
+// Uses filepath.Rel so the filesystem root (parent == "/") is handled
+// correctly — a naive HasPrefix(child, parent+sep) would turn into
+// HasPrefix(child, "//") and reject every child of "/".
+func pathInside(parent, child string) bool {
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
+	}
+	if rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// WriteToStdout writes each file to w prefixed by a `# === path ===` banner
+// so a human can easily review what would be produced.
+func (r *Result) WriteToStdout(w io.Writer) error {
+	for i, f := range r.Files {
+		if i > 0 {
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintf(w, "# === %s ===\n", f.Path); err != nil {
+			return err
+		}
+		if _, err := w.Write(f.Content); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Flatten loads the root directory and returns the set of files that
@@ -42,10 +125,6 @@ func Flatten(opts *Options) (*Result, error) {
 	}
 
 	// Collect top-level module calls in source order across files.
-	type pendingCall struct {
-		mc   *moduleCall
-		flat *flattened
-	}
 	var pending []*pendingCall
 	for _, pf := range rootFiles {
 		for _, mc := range extractModuleCalls(pf) {
@@ -110,6 +189,14 @@ func Flatten(opts *Options) (*Result, error) {
 		}
 	}
 
+	// Address-collision check: every resource/data block emitted (whether
+	// it stays in a parent file or moves to a <callname>.tf file) must have
+	// a unique "TYPE.NAME" / "data.TYPE.NAME" address — otherwise terraform
+	// will reject the output.
+	if err := checkAddressCollisions(rootFiles, pending); err != nil {
+		return nil, err
+	}
+
 	// Result accumulator.
 	out := &Result{}
 
@@ -133,6 +220,11 @@ func Flatten(opts *Options) (*Result, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		p := callsByName[name]
+		if len(p.flat.blocks) == 0 {
+			// Module contributed nothing (variables/outputs/provider only,
+			// or genuinely empty). No <callname>.tf to emit.
+			continue
+		}
 		f := hclwrite.NewEmptyFile()
 		body := f.Body()
 		for _, b := range p.flat.blocks {
@@ -165,99 +257,198 @@ func Flatten(opts *Options) (*Result, error) {
 	return out, nil
 }
 
-// rewriteParentFile produces the rewritten content for one parent .tf file:
-//  1. Each `module "X" {}` block is replaced by a commented-out version.
-//  2. Every other attribute expression is rewritten via the parent rewriter
-//     (substituting module.X.Y references with the corresponding output
-//     value expression).
+// rewriteParentFile produces the rewritten content for one parent .tf
+// file:
+//  1. Non-module top-level blocks have their attribute expressions
+//     rewritten in place (`module.X.Y` -> the inlined output expression).
+//  2. Each `module "X" {}` block is then replaced with a `#`-prefixed
+//     comment so the original is preserved in-source for review.
+//
+// The implementation mutates the existing parsed file in place (preserves
+// top-level comments and blank lines) and then does a byte-level
+// substitution to comment-out module blocks (no internal markers — those
+// could in principle collide with user content).
 //
 // Returns the new bytes and whether the file effectively changed.
 func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool) {
 	src := pf.file.Bytes()
 
-	// Strategy:
-	// 1. Apply token-level rewrite (for module.X.Y references) by walking
-	//    all top-level blocks and rewriting their attribute expressions in
-	//    place using a fresh file we build up.
-	// 2. While re-emitting blocks, replace module blocks with commented-out
-	//    text rendered from their original source range.
-	//
-	// To keep formatting close to the original, we work on a string-level
-	// transformation: render the file using hclwrite (rewriting non-module
-	// blocks) and then comment out the module blocks via raw text.
-
-	// Step 1: re-build a file with non-module blocks rewritten.
-	rewritten := hclwrite.NewEmptyFile()
-	rb := rewritten.Body()
+	// Step 1: mutate every non-module top-level block's body in place.
 	hasModule := false
+	mutated := false
 	for _, b := range pf.file.Body().Blocks() {
 		if b.Type() == "module" && len(b.Labels()) == 1 {
 			hasModule = true
-			// Insert a placeholder we will substitute with commented-out text.
-			marker := fmt.Sprintf("__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])
-			rb.AppendUnstructuredTokens(hclwrite.Tokens{
-				{Type: 0, Bytes: []byte("#:" + marker + "\n")},
-			})
 			continue
 		}
-		// Non-module blocks, and malformed module blocks (zero or multiple
-		// labels — syntactically valid HCL but not real module calls), are
-		// copied through with attribute rewriting applied.
-		nb := hclwrite.NewBlock(b.Type(), b.Labels())
-		copyBodyRewritten(b.Body(), nb.Body(), rw)
-		rb.AppendBlock(nb)
-		rb.AppendNewline()
+		before := b.BuildTokens(nil)
+		rewriteBodyInPlace(b.Body(), rw)
+		if !tokensEqual(before, b.BuildTokens(nil)) {
+			mutated = true
+		}
 	}
 
-	if !hasModule && len(parentReferencesModules(pf, rw)) == 0 {
+	if !hasModule && !mutated {
 		return src, false
 	}
 
-	formatted := hclwrite.Format(rewritten.Bytes())
-	// Step 2: substitute markers with the commented-out source of each module block.
-	finalBuf := bytes.NewBuffer(nil)
-	finalBuf.Write(formatted)
-	for _, b := range pf.file.Body().Blocks() {
-		if b.Type() != "module" || len(b.Labels()) != 1 {
+	rewritten := hclwrite.Format(pf.file.Bytes())
+
+	// Step 2: comment out each module block via byte-level transformation
+	// based on hclsyntax's source ranges. Re-parse the rewritten bytes so
+	// the positions reflect any reflows from formatting.
+	if !hasModule {
+		return rewritten, true
+	}
+	sf, diags := hclsyntax.ParseConfig(rewritten, pf.path, hcl.InitialPos)
+	if diags.HasErrors() {
+		// Should be unreachable: we just emitted this from hclwrite, which
+		// uses the same lexer. Fall back to returning the rewritten file
+		// without commenting-out (still valid HCL, just missing the audit
+		// trail).
+		return rewritten, true
+	}
+	body, ok := sf.Body.(*hclsyntax.Body)
+	if !ok {
+		return rewritten, true
+	}
+
+	type byteRange struct{ start, end int }
+	var moduleRanges []byteRange
+	for _, blk := range body.Blocks {
+		if blk.Type != "module" || len(blk.Labels) != 1 {
 			continue
 		}
-		marker := fmt.Sprintf("#:__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])
-		commented := commentOutBlock(b)
-		final := strings.Replace(finalBuf.String(), marker, commented, 1)
-		finalBuf.Reset()
-		finalBuf.WriteString(final)
+		moduleRanges = append(moduleRanges, byteRange{
+			start: blk.DefRange().Start.Byte,
+			end:   blk.CloseBraceRange.End.Byte,
+		})
 	}
-	return finalBuf.Bytes(), true
+	// Apply in descending order so byte positions remain valid as we splice.
+	sort.Slice(moduleRanges, func(i, j int) bool {
+		return moduleRanges[i].start > moduleRanges[j].start
+	})
+	out := rewritten
+	for _, r := range moduleRanges {
+		commented := commentOutBytes(out[r.start:r.end])
+		out = append(append(append([]byte{}, out[:r.start]...), commented...), out[r.end:]...)
+	}
+	return out, true
 }
 
-// commentOutBlock renders block b as a `# ...`-prefixed text representation.
-func commentOutBlock(b *hclwrite.Block) string {
-	tmp := hclwrite.NewEmptyFile()
-	tmp.Body().AppendBlock(b)
-	src := strings.TrimRight(string(hclwrite.Format(tmp.Bytes())), "\n")
-	lines := strings.Split(src, "\n")
+// commentOutBytes prefixes every line in b with `# ` (empty lines get
+// just `#`).
+func commentOutBytes(b []byte) []byte {
+	lines := bytes.Split(b, []byte{'\n'})
 	for i, line := range lines {
-		if line == "" {
-			lines[i] = "#"
+		if len(line) == 0 {
+			lines[i] = []byte{'#'}
 		} else {
-			lines[i] = "# " + line
+			lines[i] = append([]byte("# "), line...)
 		}
 	}
-	return strings.Join(lines, "\n")
+	return bytes.Join(lines, []byte{'\n'})
 }
 
-// parentReferencesModules is a coarse check: does pf actually reference any
-// module.X.Y that we know about? Used to decide if the file changed.
-func parentReferencesModules(pf *parsedFile, rw *rewriter) []string {
-	if rw.modules == nil {
-		return nil
+// resourceAddr returns "TYPE.NAME" for a resource block or "data.TYPE.NAME"
+// for a data block. Returns "" if the block has the wrong number of labels.
+func resourceAddr(b *hclwrite.Block) string {
+	labels := b.Labels()
+	if len(labels) != 2 {
+		return ""
 	}
-	src := string(pf.file.Bytes())
-	var hits []string
-	for key := range rw.modules {
-		if strings.Contains(src, "module."+strings.SplitN(key, ".", 2)[0]+".") {
-			hits = append(hits, key)
+	if b.Type() == "data" {
+		return "data." + labels[0] + "." + labels[1]
+	}
+	return labels[0] + "." + labels[1]
+}
+
+// addrOwner records where a given resource/data address was declared so
+// collision diagnostics can point users at the actual source location.
+type addrOwner struct {
+	desc string    // e.g. `parent file main.tf` or `module call "m"`
+	loc  hcl.Range // source range; .Filename == "" if unknown
+}
+
+func (o addrOwner) String() string {
+	if o.loc.Filename != "" {
+		return o.desc + " at " + formatRange(o.loc)
+	}
+	return o.desc
+}
+
+// checkAddressCollisions scans every resource/data block that will exist
+// in the flattened project (parent files + inlined module bodies) and
+// returns an error if any two share the same Terraform address.
+//
+// Diagnostics include the source range of both colliding declarations.
+// For parent blocks the range points at the block header itself; for
+// module-supplied blocks we point at the module call (since the renamed
+// block no longer corresponds to a single named position in the module
+// body).
+func checkAddressCollisions(rootFiles []*parsedFile, pending []*pendingCall) error {
+	owner := map[string]addrOwner{}
+	for _, pf := range rootFiles {
+		if pf.syntax == nil {
+			continue
+		}
+		// Walk hclsyntax (not hclwrite) so each block carries its own
+		// SrcRange. Using findBlockRange would return the *first* match
+		// in the file for every duplicate, hiding the second's true
+		// location.
+		for _, blk := range pf.syntax.Blocks {
+			if blk.Type != "resource" && blk.Type != "data" {
+				continue
+			}
+			if len(blk.Labels) != 2 {
+				continue
+			}
+			var addr string
+			if blk.Type == "data" {
+				addr = "data." + blk.Labels[0] + "." + blk.Labels[1]
+			} else {
+				addr = blk.Labels[0] + "." + blk.Labels[1]
+			}
+			entry := addrOwner{
+				desc: "parent file " + pf.name,
+				loc:  blk.DefRange(),
+			}
+			if prev, ok := owner[addr]; ok {
+				return fmt.Errorf(
+					"address %q is declared twice in the parent:\n"+
+						"  first occurrence: %s\n"+
+						"  second occurrence: %s\n"+
+						"  hint: terraform itself would reject this; tflat refuses to flatten until the duplicate is resolved",
+					addr, prev, entry,
+				)
+			}
+			owner[addr] = entry
 		}
 	}
-	return hits
+	for _, p := range pending {
+		for _, b := range p.flat.blocks {
+			if b.Type() != "resource" && b.Type() != "data" {
+				continue
+			}
+			addr := resourceAddr(b)
+			if addr == "" {
+				continue
+			}
+			entry := addrOwner{
+				desc: fmt.Sprintf("module call %q", p.mc.name),
+				loc:  findBlockRange(p.mc.parentPF, "module", []string{p.mc.name}),
+			}
+			if prev, ok := owner[addr]; ok {
+				return fmt.Errorf(
+					"address %q would collide after flattening:\n"+
+						"  first occurrence: %s\n"+
+						"  second occurrence: %s\n"+
+						"  hint: rename one of the resources to avoid the prefix-rename collision",
+					addr, prev, entry,
+				)
+			}
+			owner[addr] = entry
+		}
+	}
+	return nil
 }
