@@ -116,10 +116,7 @@ func Flatten(opts *Options) (*Result, error) {
 	// Rewrite parent files: comment out module blocks and substitute
 	// module.X.Y references in attribute expressions.
 	for _, pf := range rootFiles {
-		newContent, changed, err := rewriteParentFile(pf, parentRW)
-		if err != nil {
-			return nil, err
-		}
+		newContent, changed := rewriteParentFile(pf, parentRW)
 		if changed {
 			out.Files = append(out.Files, FileOutput{
 				Path:    pf.name,
@@ -175,7 +172,7 @@ func Flatten(opts *Options) (*Result, error) {
 //     value expression).
 //
 // Returns the new bytes and whether the file effectively changed.
-func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool, error) {
+func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool) {
 	src := pf.file.Bytes()
 
 	// Strategy:
@@ -194,7 +191,7 @@ func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool, error) {
 	rb := rewritten.Body()
 	hasModule := false
 	for _, b := range pf.file.Body().Blocks() {
-		if b.Type() == "module" {
+		if b.Type() == "module" && len(b.Labels()) == 1 {
 			hasModule = true
 			// Insert a placeholder we will substitute with commented-out text.
 			marker := fmt.Sprintf("__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])
@@ -203,16 +200,17 @@ func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool, error) {
 			})
 			continue
 		}
+		// Non-module blocks, and malformed module blocks (zero or multiple
+		// labels — syntactically valid HCL but not real module calls), are
+		// copied through with attribute rewriting applied.
 		nb := hclwrite.NewBlock(b.Type(), b.Labels())
-		if err := copyBodyRewritten(b.Body(), nb.Body(), rw); err != nil {
-			return nil, false, err
-		}
+		copyBodyRewritten(b.Body(), nb.Body(), rw)
 		rb.AppendBlock(nb)
 		rb.AppendNewline()
 	}
 
 	if !hasModule && len(parentReferencesModules(pf, rw)) == 0 {
-		return src, false, nil
+		return src, false
 	}
 
 	formatted := hclwrite.Format(rewritten.Bytes())
@@ -220,7 +218,7 @@ func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool, error) {
 	finalBuf := bytes.NewBuffer(nil)
 	finalBuf.Write(formatted)
 	for _, b := range pf.file.Body().Blocks() {
-		if b.Type() != "module" {
+		if b.Type() != "module" || len(b.Labels()) != 1 {
 			continue
 		}
 		marker := fmt.Sprintf("#:__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])
@@ -229,7 +227,7 @@ func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool, error) {
 		finalBuf.Reset()
 		finalBuf.WriteString(final)
 	}
-	return finalBuf.Bytes(), true, nil
+	return finalBuf.Bytes(), true
 }
 
 // commentOutBlock renders block b as a `# ...`-prefixed text representation.
