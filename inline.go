@@ -109,7 +109,7 @@ func flattenCall(
 	// scope) before recursing.
 	resourceRename := map[string]string{}
 	for addr := range lm.resourceAddrs {
-		parts := strings.SplitN(addr, ".", -1)
+		parts := strings.Split(addr, ".")
 		if strings.HasPrefix(addr, "data.") {
 			if len(parts) == 3 {
 				resourceRename[addr] = prefix + "_" + parts[2]

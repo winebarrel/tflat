@@ -37,8 +37,7 @@ func (r *rewriter) rewriteTokens(in hclwrite.Tokens) hclwrite.Tokens {
 			isIdent(in[i], "var") &&
 			isDot(in[i+1]) &&
 			in[i+2].Type == hclsyntax.TokenIdent {
-			name := string(in[i+2].Bytes)
-			if sub, ok := r.vars[name]; ok {
+			if sub, ok := r.vars[string(in[i+2].Bytes)]; ok {
 				spacesBefore := in[i].SpacesBefore
 				embedded := substituteForEmbed(sub)
 				if len(embedded) > 0 {
@@ -77,8 +76,7 @@ func (r *rewriter) rewriteTokens(in hclwrite.Tokens) hclwrite.Tokens {
 			isIdent(in[i], "local") &&
 			isDot(in[i+1]) &&
 			in[i+2].Type == hclsyntax.TokenIdent {
-			name := string(in[i+2].Bytes)
-			if newName, ok := r.localsRename[name]; ok {
+			if newName, ok := r.localsRename[string(in[i+2].Bytes)]; ok {
 				out = append(out, in[i], in[i+1])
 				renamed := *in[i+2]
 				renamed.Bytes = []byte(newName)

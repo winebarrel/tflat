@@ -54,10 +54,6 @@ func Flatten(opts *Options) (*Result, error) {
 	}
 
 	// Flatten each call.
-	type byCall struct {
-		name    string
-		outputs map[string]hclwrite.Tokens
-	}
 	parentModuleSubst := map[string]hclwrite.Tokens{} // "name.output" -> tokens
 	callsByName := map[string]*pendingCall{}
 	for _, p := range pending {
