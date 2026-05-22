@@ -3,6 +3,9 @@ package tflat
 import (
 	"bytes"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
 	"strings"
 
@@ -20,6 +23,44 @@ type Result struct {
 type FileOutput struct {
 	Path    string
 	Content []byte
+}
+
+// pendingCall pairs a module call with the flattened result we produced
+// for it. Hoisted to file scope so checkAddressCollisions can take it.
+type pendingCall struct {
+	mc   *moduleCall
+	flat *flattened
+}
+
+// WriteToDir writes each file in the result into dir using its relative
+// path. Existing files are overwritten.
+func (r *Result) WriteToDir(dir string) error {
+	for _, f := range r.Files {
+		path := filepath.Join(dir, f.Path)
+		if err := os.WriteFile(path, f.Content, 0644); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// WriteToStdout writes each file to w prefixed by a `# === path ===` banner
+// so a human can easily review what would be produced.
+func (r *Result) WriteToStdout(w io.Writer) error {
+	for i, f := range r.Files {
+		if i > 0 {
+			if _, err := fmt.Fprintln(w); err != nil {
+				return err
+			}
+		}
+		if _, err := fmt.Fprintf(w, "# === %s ===\n", f.Path); err != nil {
+			return err
+		}
+		if _, err := w.Write(f.Content); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // Flatten loads the root directory and returns the set of files that
@@ -42,10 +83,6 @@ func Flatten(opts *Options) (*Result, error) {
 	}
 
 	// Collect top-level module calls in source order across files.
-	type pendingCall struct {
-		mc   *moduleCall
-		flat *flattened
-	}
 	var pending []*pendingCall
 	for _, pf := range rootFiles {
 		for _, mc := range extractModuleCalls(pf) {
@@ -110,6 +147,14 @@ func Flatten(opts *Options) (*Result, error) {
 		}
 	}
 
+	// Address-collision check: every resource/data block emitted (whether
+	// it stays in a parent file or moves to a <callname>.tf file) must have
+	// a unique "TYPE.NAME" / "data.TYPE.NAME" address — otherwise terraform
+	// will reject the output.
+	if err := checkAddressCollisions(rootFiles, pending); err != nil {
+		return nil, err
+	}
+
 	// Result accumulator.
 	out := &Result{}
 
@@ -133,6 +178,11 @@ func Flatten(opts *Options) (*Result, error) {
 	sort.Strings(names)
 	for _, name := range names {
 		p := callsByName[name]
+		if len(p.flat.blocks) == 0 {
+			// Module contributed nothing (variables/outputs/provider only,
+			// or genuinely empty). No <callname>.tf to emit.
+			continue
+		}
 		f := hclwrite.NewEmptyFile()
 		body := f.Body()
 		for _, b := range p.flat.blocks {
@@ -260,4 +310,58 @@ func parentReferencesModules(pf *parsedFile, rw *rewriter) []string {
 		}
 	}
 	return hits
+}
+
+// resourceAddr returns "TYPE.NAME" for a resource block or "data.TYPE.NAME"
+// for a data block. Returns "" if the block has the wrong number of labels.
+func resourceAddr(b *hclwrite.Block) string {
+	labels := b.Labels()
+	if len(labels) != 2 {
+		return ""
+	}
+	if b.Type() == "data" {
+		return "data." + labels[0] + "." + labels[1]
+	}
+	return labels[0] + "." + labels[1]
+}
+
+// checkAddressCollisions scans every resource/data block that will exist in
+// the flattened project (parent files + inlined module bodies) and returns
+// an error if any two share the same Terraform address.
+func checkAddressCollisions(rootFiles []*parsedFile, pending []*pendingCall) error {
+	owner := map[string]string{} // addr -> human-readable source
+	for _, pf := range rootFiles {
+		for _, b := range pf.file.Body().Blocks() {
+			if b.Type() != "resource" && b.Type() != "data" {
+				continue
+			}
+			addr := resourceAddr(b)
+			if addr == "" {
+				continue
+			}
+			owner[addr] = "parent file " + pf.name
+		}
+	}
+	for _, p := range pending {
+		for _, b := range p.flat.blocks {
+			if b.Type() != "resource" && b.Type() != "data" {
+				continue
+			}
+			addr := resourceAddr(b)
+			if addr == "" {
+				continue
+			}
+			if prev, ok := owner[addr]; ok {
+				return fmt.Errorf(
+					"address %q would collide after flattening:\n"+
+						"  first occurrence: %s\n"+
+						"  second occurrence: module call %q\n"+
+						"  hint: rename one of the resources to avoid the prefix-rename collision",
+					addr, prev, p.mc.name,
+				)
+			}
+			owner[addr] = "module call " + p.mc.name
+		}
+	}
+	return nil
 }

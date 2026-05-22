@@ -1,6 +1,7 @@
 package tflat
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -72,6 +73,55 @@ func TestParseDir_FileReadError(t *testing.T) {
 	_, err := parseDir(tmp)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "read ")
+}
+
+// TestResourceAddr_BadLabels covers the defensive empty-string return when
+// resourceAddr sees a block with the wrong number of labels.
+func TestResourceAddr_BadLabels(t *testing.T) {
+	tmp := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "x.tf"),
+		[]byte(`resource "x" {}`), 0644))
+	files, err := parseDir(tmp)
+	require.NoError(t, err)
+	for _, b := range files[0].file.Body().Blocks() {
+		if b.Type() == "resource" {
+			assert.Empty(t, resourceAddr(b))
+		}
+	}
+}
+
+// TestCheckAddressCollisions_IgnoresMalformed verifies that malformed
+// resource blocks (wrong label count) are skipped by the collision check
+// rather than crashing it.
+func TestCheckAddressCollisions_IgnoresMalformed(t *testing.T) {
+	tmp := t.TempDir()
+	// `resource "x" {}` has one label; the address-check loop must skip it.
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "x.tf"),
+		[]byte(`resource "x" {}`), 0644))
+	files, err := parseDir(tmp)
+	require.NoError(t, err)
+	require.NoError(t, checkAddressCollisions(files, nil))
+}
+
+// errWriter always errors; used to exercise WriteToStdout's error returns.
+type errWriter struct{}
+
+func (errWriter) Write(p []byte) (int, error) {
+	return 0, errBoom
+}
+
+var errBoom = errors.New("boom")
+
+// TestResult_WriteToStdout_WriterError covers the WriteToStdout error
+// branches. Passing a writer that always fails surfaces the first error
+// up.
+func TestResult_WriteToStdout_WriterError(t *testing.T) {
+	res := &Result{Files: []FileOutput{
+		{Path: "a.tf", Content: []byte("x")},
+		{Path: "b.tf", Content: []byte("y")},
+	}}
+	err := res.WriteToStdout(errWriter{})
+	require.Error(t, err)
 }
 
 // TestCollectMovedForCall_LoadModuleError covers the loadModule error path

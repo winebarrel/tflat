@@ -361,6 +361,143 @@ func TestFlatten_SplitParent(t *testing.T) {
 	assert.False(t, hasStandalone, "untouched files must not be re-emitted")
 }
 
+func TestFlatten_MultipleResources(t *testing.T) {
+	// One module with two resources; the second references the first via
+	// `aws_s3_bucket.this.id`. Both must be renamed with the prefix and the
+	// inner reference rewritten.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/multi_resource"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	assert.Contains(t, mTF, "resource \"aws_s3_bucket\" \"m_this\"")
+	assert.Contains(t, mTF, "resource \"aws_s3_bucket_policy\" \"m_p\"")
+	assert.Contains(t, mTF, "bucket = aws_s3_bucket.m_this.id",
+		"cross-resource ref must be rewritten to the prefixed name")
+}
+
+func TestFlatten_SharedSource(t *testing.T) {
+	// Two module calls pointing at the same source directory must each
+	// produce their own prefix-scoped copy.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/shared_source"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	aTF, ok := files["a.tf"]
+	require.True(t, ok)
+	assert.Contains(t, aTF, "resource \"aws_s3_bucket\" \"a_this\"")
+	assert.Contains(t, aTF, `bucket = "a"`)
+	bTF, ok := files["b.tf"]
+	require.True(t, ok)
+	assert.Contains(t, bTF, "resource \"aws_s3_bucket\" \"b_this\"")
+	assert.Contains(t, bTF, `bucket = "b"`)
+}
+
+func TestFlatten_ProviderInModuleStripped(t *testing.T) {
+	// `terraform` and `provider` blocks inside the module must NOT be
+	// copied into the flattened output (they would duplicate root config).
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/provider_in_module"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	assert.Contains(t, mTF, "resource \"aws_s3_bucket\" \"m_this\"")
+	assert.NotContains(t, mTF, "terraform {")
+	assert.NotContains(t, mTF, "required_providers")
+	assert.NotContains(t, mTF, "provider \"aws\"")
+}
+
+func TestFlatten_DynamicBlock(t *testing.T) {
+	// dynamic block survives flattening; var.X inside it gets substituted.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/dynamic_block"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	assert.Contains(t, mTF, "dynamic \"ingress\"")
+	assert.Contains(t, mTF, "[80, 443]",
+		"var.ports must be substituted with the caller's literal list")
+	assert.NotContains(t, mTF, "var.ports")
+	assert.Contains(t, mTF, "from_port = ingress.value",
+		"ingress.value reference inside content is preserved")
+}
+
+func TestFlatten_AddressCollision(t *testing.T) {
+	// Parent already owns the address that the module's renamed resource
+	// would take. Must surface a diagnostic instead of silently producing
+	// duplicate-address output.
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/collision"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, `address "aws_s3_bucket.m_this" would collide`)
+	assert.Contains(t, msg, "parent file main.tf")
+	assert.Contains(t, msg, `module call "m"`)
+}
+
+func TestFlatten_EmptyModule(t *testing.T) {
+	// Module with no resources produces neither <name>.tf nor moved.tf.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/empty_module"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	_, hasM := files["m.tf"]
+	assert.False(t, hasM, "empty module should not emit m.tf (files=%v)", keys(files))
+	_, hasMoved := files["moved.tf"]
+	assert.False(t, hasMoved, "no resources => no moved.tf")
+	// main.tf was still rewritten to comment out the module block.
+	main, ok := files["main.tf"]
+	require.True(t, ok)
+	assert.Contains(t, main, "# module \"m\"")
+}
+
+func TestFlatten_Provisioner(t *testing.T) {
+	// A resource with provisioner / lifecycle nested blocks must survive
+	// flattening with token-level rewriting applied inside the nested
+	// blocks (`${var.msg}` -> `${"hi"}`).
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/provisioner"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	assert.Contains(t, mTF, "provisioner \"local-exec\"")
+	assert.Contains(t, mTF, "lifecycle {")
+	assert.Contains(t, mTF, "create_before_destroy = true")
+	assert.Contains(t, mTF, `"hi"`, "var.msg substituted into provisioner.command")
+	assert.NotContains(t, mTF, "var.msg")
+}
+
+func TestFlatten_MetaArgsIgnored(t *testing.T) {
+	// `depends_on` and `providers` on a module call are meta-arguments;
+	// they must not bleed into the inlined resources (they are call-site
+	// concerns, not module-body data).
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/meta_args"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	assert.NotContains(t, mTF, "depends_on")
+	assert.NotContains(t, mTF, "providers")
+}
+
 // stripCommentLines drops any line that begins (after leading whitespace)
 // with '#', so assertions about *active* content don't trip over the
 // commented-out original module block.

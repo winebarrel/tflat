@@ -1,10 +1,8 @@
 package main
 
 import (
-	"fmt"
 	"log"
 	"os"
-	"path/filepath"
 
 	"github.com/alecthomas/kong"
 	"github.com/winebarrel/tflat"
@@ -35,20 +33,13 @@ func main() {
 	}
 
 	if opts.InPlace {
-		for _, f := range res.Files {
-			path := filepath.Join(opts.Dir, f.Path)
-			if err := os.WriteFile(path, f.Content, 0644); err != nil {
-				log.Fatal(err)
-			}
+		if err := res.WriteToDir(opts.Dir); err != nil {
+			log.Fatal(err)
 		}
 		return
 	}
 
-	for i, f := range res.Files {
-		if i > 0 {
-			fmt.Println()
-		}
-		fmt.Printf("# === %s ===\n", f.Path)
-		os.Stdout.Write(f.Content)
+	if err := res.WriteToStdout(os.Stdout); err != nil {
+		log.Fatal(err)
 	}
 }
