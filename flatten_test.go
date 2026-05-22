@@ -361,6 +361,78 @@ func TestFlatten_SplitParent(t *testing.T) {
 	assert.False(t, hasStandalone, "untouched files must not be re-emitted")
 }
 
+func TestFlatten_MissingRequiredVar(t *testing.T) {
+	// Module declares a required variable (no default) but the caller does
+	// not pass it. Must error rather than silently emitting `var.X` into
+	// the flattened output (which would later fail terraform plan with a
+	// less helpful "undeclared input variable" error).
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/missing_required_var"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "required variable")
+	assert.Contains(t, msg, "\"required\"")
+	assert.Contains(t, msg, "testdata/missing_required_var/main.tf:1:1")
+}
+
+func TestFlatten_AttributeOrderPreserved(t *testing.T) {
+	// Source-order of resource attributes must be preserved after
+	// flattening (not sorted alphabetically). In particular, `count` /
+	// meta-args that the user put first must stay first.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/attr_order"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	// Extract attribute names in the order they appear within the
+	// resource block.
+	idxCount := strings.Index(mTF, "count")
+	idxAMI := strings.Index(mTF, "ami")
+	idxIType := strings.Index(mTF, "instance_type")
+	idxTags := strings.Index(mTF, "tags")
+	idxVPC := strings.Index(mTF, "vpc_security_group_ids")
+	require.True(t, idxCount > 0 && idxAMI > 0 && idxIType > 0 && idxTags > 0 && idxVPC > 0,
+		"all attributes must be present")
+	assert.Less(t, idxCount, idxAMI, "count must come before ami (source order)")
+	assert.Less(t, idxAMI, idxIType, "ami must come before instance_type")
+	assert.Less(t, idxIType, idxTags, "instance_type must come before tags")
+	assert.Less(t, idxTags, idxVPC, "tags must come before vpc_security_group_ids")
+}
+
+func TestFlatten_TopLevelCommentsPreserved(t *testing.T) {
+	// Top-level comments in the parent file (before/between/after blocks)
+	// must survive the rewrite. Earlier implementations rebuilt the file
+	// from blocks only and silently dropped comments.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/top_comments"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mainTF, ok := files["main.tf"]
+	require.True(t, ok)
+	assert.Contains(t, mainTF, "# File-level comment describing this stack's purpose.")
+	assert.Contains(t, mainTF, "# Owned by the platform team.")
+	assert.Contains(t, mainTF, "# Separator comment grouping unrelated resources below.")
+	// And the module call is still commented out, the resource still there.
+	assert.Contains(t, mainTF, "# module \"m\"")
+	assert.Contains(t, mainTF, "resource \"aws_iam_role\" \"r\"")
+}
+
+func TestFlatten_BothMetaOnCall(t *testing.T) {
+	// A module call cannot legitimately declare both count and for_each.
+	// tflat must detect this up front instead of silently producing a
+	// resource block that has both (which terraform later rejects).
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/both_meta_call"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "count")
+	assert.Contains(t, msg, "for_each")
+	assert.Contains(t, msg, "testdata/both_meta_call/main.tf")
+}
+
 func TestFlatten_MultipleResources(t *testing.T) {
 	// One module with two resources; the second references the first via
 	// `aws_s3_bucket.this.id`. Both must be renamed with the prefix and the

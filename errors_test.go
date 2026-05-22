@@ -140,6 +140,39 @@ resource "aws_s3_bucket" "this" { bucket = var.name }`,
 	assert.Contains(t, string(movedBytes), "to   = aws_s3_bucket.m_this")
 }
 
+func TestResult_WriteToDir_PreservesMode(t *testing.T) {
+	// When overwriting an existing file, WriteToDir keeps the original
+	// permission bits instead of clobbering them with 0644.
+	if os.Getuid() == 0 {
+		t.Skip("running as root: file modes aren't enforced")
+	}
+	tmp := t.TempDir()
+	mainPath := filepath.Join(tmp, "main.tf")
+	require.NoError(t, os.WriteFile(mainPath, []byte("# placeholder"), 0644))
+	// Force the mode explicitly: WriteFile honours umask which would strip
+	// group-write on most systems otherwise.
+	require.NoError(t, os.Chmod(mainPath, 0664))
+
+	res := &tflat.Result{Files: []tflat.FileOutput{
+		{Path: "main.tf", Content: []byte("# rewritten")},
+		{Path: "new.tf", Content: []byte("# new")},
+	}}
+	require.NoError(t, res.WriteToDir(tmp))
+
+	info, err := os.Stat(mainPath)
+	require.NoError(t, err)
+	assert.Equal(t, os.FileMode(0664), info.Mode().Perm(),
+		"existing file mode must be preserved")
+
+	info, err = os.Stat(filepath.Join(tmp, "new.tf"))
+	require.NoError(t, err)
+	// The default mode 0644 is subject to umask too, so accept whatever
+	// 0644 turns into here — we just want the *existing* file's mode to
+	// have been honoured above.
+	assert.NotEqual(t, os.FileMode(0664), info.Mode().Perm(),
+		"new file does not inherit the existing file's special mode")
+}
+
 func TestResult_WriteToDir_NoWritablePath(t *testing.T) {
 	// If the target directory doesn't exist, WriteToDir surfaces the error
 	// (it does not silently swallow it).

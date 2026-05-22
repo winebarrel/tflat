@@ -98,6 +98,37 @@ func findAttrRange(pf *parsedFile, blockType string, labels []string, attrName s
 	return hcl.Range{}
 }
 
+// findBlockRange returns the source range of a top-level block with the
+// given type and labels (the block header range, e.g. `module "X"`).
+// Returns an empty range if not found.
+func findBlockRange(pf *parsedFile, blockType string, labels []string) hcl.Range {
+	if pf == nil || pf.syntax == nil {
+		return hcl.Range{}
+	}
+	for _, blk := range pf.syntax.Blocks {
+		if blk.Type != blockType {
+			continue
+		}
+		if labels != nil && !labelsMatch(blk.Labels, labels) {
+			continue
+		}
+		return blk.DefRange()
+	}
+	return hcl.Range{}
+}
+
+// findBlockRangeIn searches multiple parsedFiles for the first matching
+// block. Used to point at variable declarations buried inside any of a
+// module's files.
+func findBlockRangeIn(files []*parsedFile, blockType string, labels []string) hcl.Range {
+	for _, pf := range files {
+		if r := findBlockRange(pf, blockType, labels); r.Filename != "" {
+			return r
+		}
+	}
+	return hcl.Range{}
+}
+
 func labelsMatch(a, b []string) bool {
 	if len(a) != len(b) {
 		return false

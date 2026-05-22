@@ -7,8 +7,9 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
-	"strings"
 
+	"github.com/hashicorp/hcl/v2"
+	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/hashicorp/hcl/v2/hclwrite"
 )
 
@@ -33,11 +34,16 @@ type pendingCall struct {
 }
 
 // WriteToDir writes each file in the result into dir using its relative
-// path. Existing files are overwritten.
+// path. When overwriting an existing file the original permission bits
+// are preserved; new files are created with 0644.
 func (r *Result) WriteToDir(dir string) error {
 	for _, f := range r.Files {
 		path := filepath.Join(dir, f.Path)
-		if err := os.WriteFile(path, f.Content, 0644); err != nil {
+		mode := os.FileMode(0644)
+		if info, err := os.Stat(path); err == nil {
+			mode = info.Mode().Perm()
+		}
+		if err := os.WriteFile(path, f.Content, mode); err != nil {
 			return err
 		}
 	}
@@ -215,101 +221,97 @@ func Flatten(opts *Options) (*Result, error) {
 	return out, nil
 }
 
-// rewriteParentFile produces the rewritten content for one parent .tf file:
-//  1. Each `module "X" {}` block is replaced by a commented-out version.
-//  2. Every other attribute expression is rewritten via the parent rewriter
-//     (substituting module.X.Y references with the corresponding output
-//     value expression).
+// rewriteParentFile produces the rewritten content for one parent .tf
+// file:
+//  1. Non-module top-level blocks have their attribute expressions
+//     rewritten in place (`module.X.Y` -> the inlined output expression).
+//  2. Each `module "X" {}` block is then replaced with a `#`-prefixed
+//     comment so the original is preserved in-source for review.
+//
+// The implementation mutates the existing parsed file in place (preserves
+// top-level comments and blank lines) and then does a byte-level
+// substitution to comment-out module blocks (no internal markers — those
+// could in principle collide with user content).
 //
 // Returns the new bytes and whether the file effectively changed.
 func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool) {
 	src := pf.file.Bytes()
 
-	// Strategy:
-	// 1. Apply token-level rewrite (for module.X.Y references) by walking
-	//    all top-level blocks and rewriting their attribute expressions in
-	//    place using a fresh file we build up.
-	// 2. While re-emitting blocks, replace module blocks with commented-out
-	//    text rendered from their original source range.
-	//
-	// To keep formatting close to the original, we work on a string-level
-	// transformation: render the file using hclwrite (rewriting non-module
-	// blocks) and then comment out the module blocks via raw text.
-
-	// Step 1: re-build a file with non-module blocks rewritten.
-	rewritten := hclwrite.NewEmptyFile()
-	rb := rewritten.Body()
+	// Step 1: mutate every non-module top-level block's body in place.
 	hasModule := false
+	mutated := false
 	for _, b := range pf.file.Body().Blocks() {
 		if b.Type() == "module" && len(b.Labels()) == 1 {
 			hasModule = true
-			// Insert a placeholder we will substitute with commented-out text.
-			marker := fmt.Sprintf("__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])
-			rb.AppendUnstructuredTokens(hclwrite.Tokens{
-				{Type: 0, Bytes: []byte("#:" + marker + "\n")},
-			})
 			continue
 		}
-		// Non-module blocks, and malformed module blocks (zero or multiple
-		// labels — syntactically valid HCL but not real module calls), are
-		// copied through with attribute rewriting applied.
-		nb := hclwrite.NewBlock(b.Type(), b.Labels())
-		copyBodyRewritten(b.Body(), nb.Body(), rw)
-		rb.AppendBlock(nb)
-		rb.AppendNewline()
+		before := b.BuildTokens(nil)
+		rewriteBodyInPlace(b.Body(), rw)
+		if !tokensEqual(before, b.BuildTokens(nil)) {
+			mutated = true
+		}
 	}
 
-	if !hasModule && len(parentReferencesModules(pf, rw)) == 0 {
+	if !hasModule && !mutated {
 		return src, false
 	}
 
-	formatted := hclwrite.Format(rewritten.Bytes())
-	// Step 2: substitute markers with the commented-out source of each module block.
-	finalBuf := bytes.NewBuffer(nil)
-	finalBuf.Write(formatted)
-	for _, b := range pf.file.Body().Blocks() {
-		if b.Type() != "module" || len(b.Labels()) != 1 {
+	rewritten := hclwrite.Format(pf.file.Bytes())
+
+	// Step 2: comment out each module block via byte-level transformation
+	// based on hclsyntax's source ranges. Re-parse the rewritten bytes so
+	// the positions reflect any reflows from formatting.
+	if !hasModule {
+		return rewritten, true
+	}
+	sf, diags := hclsyntax.ParseConfig(rewritten, pf.path, hcl.InitialPos)
+	if diags.HasErrors() {
+		// Should be unreachable: we just emitted this from hclwrite, which
+		// uses the same lexer. Fall back to returning the rewritten file
+		// without commenting-out (still valid HCL, just missing the audit
+		// trail).
+		return rewritten, true
+	}
+	body, ok := sf.Body.(*hclsyntax.Body)
+	if !ok {
+		return rewritten, true
+	}
+
+	type byteRange struct{ start, end int }
+	var moduleRanges []byteRange
+	for _, blk := range body.Blocks {
+		if blk.Type != "module" || len(blk.Labels) != 1 {
 			continue
 		}
-		marker := fmt.Sprintf("#:__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])
-		commented := commentOutBlock(b)
-		final := strings.Replace(finalBuf.String(), marker, commented, 1)
-		finalBuf.Reset()
-		finalBuf.WriteString(final)
+		moduleRanges = append(moduleRanges, byteRange{
+			start: blk.DefRange().Start.Byte,
+			end:   blk.CloseBraceRange.End.Byte,
+		})
 	}
-	return finalBuf.Bytes(), true
+	// Apply in descending order so byte positions remain valid as we splice.
+	sort.Slice(moduleRanges, func(i, j int) bool {
+		return moduleRanges[i].start > moduleRanges[j].start
+	})
+	out := rewritten
+	for _, r := range moduleRanges {
+		commented := commentOutBytes(out[r.start:r.end])
+		out = append(append(append([]byte{}, out[:r.start]...), commented...), out[r.end:]...)
+	}
+	return out, true
 }
 
-// commentOutBlock renders block b as a `# ...`-prefixed text representation.
-func commentOutBlock(b *hclwrite.Block) string {
-	tmp := hclwrite.NewEmptyFile()
-	tmp.Body().AppendBlock(b)
-	src := strings.TrimRight(string(hclwrite.Format(tmp.Bytes())), "\n")
-	lines := strings.Split(src, "\n")
+// commentOutBytes prefixes every line in b with `# ` (empty lines get
+// just `#`).
+func commentOutBytes(b []byte) []byte {
+	lines := bytes.Split(b, []byte{'\n'})
 	for i, line := range lines {
-		if line == "" {
-			lines[i] = "#"
+		if len(line) == 0 {
+			lines[i] = []byte{'#'}
 		} else {
-			lines[i] = "# " + line
+			lines[i] = append([]byte("# "), line...)
 		}
 	}
-	return strings.Join(lines, "\n")
-}
-
-// parentReferencesModules is a coarse check: does pf actually reference any
-// module.X.Y that we know about? Used to decide if the file changed.
-func parentReferencesModules(pf *parsedFile, rw *rewriter) []string {
-	if rw.modules == nil {
-		return nil
-	}
-	src := string(pf.file.Bytes())
-	var hits []string
-	for key := range rw.modules {
-		if strings.Contains(src, "module."+strings.SplitN(key, ".", 2)[0]+".") {
-			hits = append(hits, key)
-		}
-	}
-	return hits
+	return bytes.Join(lines, []byte{'\n'})
 }
 
 // resourceAddr returns "TYPE.NAME" for a resource block or "data.TYPE.NAME"

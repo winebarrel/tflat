@@ -84,6 +84,16 @@ func flattenCall(
 	moduleKey string,
 	dirs map[string]string,
 ) (*flattened, error) {
+	// A module call may not legitimately declare both count and for_each.
+	// Terraform would reject it, but we should not silently propagate both
+	// onto the inlined resources.
+	if mc.count != nil && mc.forEach != nil {
+		return nil, fmt.Errorf(
+			"module call %q declares both count and for_each (mutually exclusive) at %s",
+			mc.name, formatRange(findBlockRange(mc.parentPF, "module", []string{mc.name})),
+		)
+	}
+
 	dir, ok := dirs[moduleKey]
 	if !ok {
 		return nil, fmt.Errorf("module %q not found in .terraform/modules/modules.json (run `terraform init`?)", moduleKey)
@@ -93,13 +103,26 @@ func flattenCall(
 		return nil, err
 	}
 
-	// Build var substitution map: caller args override, else module's default.
+	// Build var substitution map: caller args override, else module's
+	// default. A variable that is required (no default) AND not provided by
+	// the caller is a hard error — silently leaving `var.X` in the output
+	// would produce a broken Terraform configuration that only fails at
+	// `terraform plan` time with a less actionable message.
 	vars := map[string]hclwrite.Tokens{}
 	for name, def := range lm.variables {
 		if arg, ok := mc.args[name]; ok {
 			vars[name] = arg
 		} else if def != nil {
 			vars[name] = def
+		} else {
+			return nil, fmt.Errorf(
+				"module call %q does not provide required variable %q:\n"+
+					"  module call: %s\n"+
+					"  variable declared: %s",
+				mc.name, name,
+				formatRange(findBlockRange(mc.parentPF, "module", []string{mc.name})),
+				formatRange(findBlockRangeIn(lm.files, "variable", []string{name})),
+			)
 		}
 	}
 
@@ -207,18 +230,19 @@ func flattenCall(
 			case "module":
 				continue // handled via nestedBlocks
 			case "resource", "data":
-				nb, err := cloneAndRewriteResource(b, prefix, mc, rw, pf)
+				nb, err := mutateResource(b, prefix, mc, rw, pf)
 				if err != nil {
 					return nil, err
 				}
 				out = append(out, nb)
 			case "locals":
-				nb := cloneAndRewriteLocals(b, prefix, rw)
+				nb := mutateLocals(b, prefix, rw)
 				out = append(out, nb)
 			default:
-				// e.g. "moved", "import", "check" -- copy as-is with rewrite applied.
-				nb := cloneAndRewriteGeneric(b, rw)
-				out = append(out, nb)
+				// e.g. "moved", "import", "check" -- mutate in place with
+				// the rewriter applied.
+				mutateGeneric(b, rw)
+				out = append(out, b)
 			}
 		}
 	}
@@ -233,40 +257,49 @@ func flattenCall(
 	return &flattened{blocks: out, outputs: outs}, nil
 }
 
-// cloneAndRewriteResource clones a resource/data block, renames its second
-// label to the prefixed form, rewrites all attribute expressions, and
-// propagates the caller's count/for_each if any.
-func cloneAndRewriteResource(b *hclwrite.Block, prefix string, mc *moduleCall, rw *rewriter, pf *parsedFile) (*hclwrite.Block, error) {
+// mutateResource renames the second label, propagates the caller's
+// count/for_each if any, and rewrites all attribute expressions IN PLACE
+// on b. This preserves source ordering (including comments inside the
+// block) which a clone-then-rebuild approach would destroy.
+//
+// Because loadModule re-parses the module directory on every call, the
+// parsed file we are mutating is private to this flattenCall — no other
+// caller is observing it.
+func mutateResource(b *hclwrite.Block, prefix string, mc *moduleCall, rw *rewriter, pf *parsedFile) (*hclwrite.Block, error) {
 	labels := b.Labels()
 	if len(labels) != 2 {
 		return nil, fmt.Errorf("unexpected %s block labels: %v", b.Type(), labels)
 	}
-	newLabels := []string{labels[0], prefix + "_" + labels[1]}
-	nb := hclwrite.NewBlock(b.Type(), newLabels)
 
-	// Propagate count/for_each from the module call, if any. We reject if
-	// the resource already defines its own count/for_each because reconciling
-	// the two is ambiguous: a Terraform resource cannot use count and
-	// for_each simultaneously, and for_each cannot be 2-dimensional.
+	// Conflict check before any mutation so we don't leave the block in a
+	// half-rewritten state on error.
 	if mc.count != nil || mc.forEach != nil {
-		if a := b.Body().GetAttribute("count"); a != nil {
-			_ = a
+		if b.Body().GetAttribute("count") != nil {
 			return nil, conflictError("count", b.Type(), labels, mc, pf)
 		}
-		if a := b.Body().GetAttribute("for_each"); a != nil {
-			_ = a
+		if b.Body().GetAttribute("for_each") != nil {
 			return nil, conflictError("for_each", b.Type(), labels, mc, pf)
-		}
-		if mc.count != nil {
-			nb.Body().SetAttributeRaw("count", cloneTokens(mc.count))
-		}
-		if mc.forEach != nil {
-			nb.Body().SetAttributeRaw("for_each", cloneTokens(mc.forEach))
 		}
 	}
 
-	copyBodyRewritten(b.Body(), nb.Body(), rw)
-	return nb, nil
+	// Rename second label.
+	b.SetLabels([]string{labels[0], prefix + "_" + labels[1]})
+
+	// Propagate count/for_each. SetAttributeRaw on a new name appends at the
+	// end of the body, which is the best we can do without low-level token
+	// manipulation; the conventional "top of resource" placement is lost
+	// for these propagated attributes but the body's overall ordering is
+	// otherwise preserved.
+	if mc.count != nil {
+		b.Body().SetAttributeRaw("count", cloneTokens(mc.count))
+	}
+	if mc.forEach != nil {
+		b.Body().SetAttributeRaw("for_each", cloneTokens(mc.forEach))
+	}
+
+	// Rewrite all attribute expressions in place (preserves position).
+	rewriteBodyInPlace(b.Body(), rw)
+	return b, nil
 }
 
 // conflictError builds a diagnostic-style message showing both the module
@@ -294,31 +327,35 @@ func conflictError(attrName, blockType string, labels []string, mc *moduleCall, 
 	)
 }
 
-// cloneAndRewriteLocals clones a locals block and renames each attribute key
-// to its prefixed form.
-func cloneAndRewriteLocals(b *hclwrite.Block, prefix string, rw *rewriter) *hclwrite.Block {
-	nb := hclwrite.NewBlock("locals", nil)
-	// Sort to keep output deterministic.
+// mutateLocals renames each attribute key in a locals block to its
+// prefixed form and rewrites the attribute expressions.
+//
+// hclwrite has no in-place rename for attribute names, so we re-emit the
+// body via SetAttributeRaw. This loses the original attribute *order* and
+// any comments inside the locals block — an accepted limitation for this
+// block type. (Names are deterministic via sort to keep output stable.)
+func mutateLocals(b *hclwrite.Block, prefix string, rw *rewriter) *hclwrite.Block {
 	attrs := b.Body().Attributes()
 	names := make([]string, 0, len(attrs))
 	for n := range attrs {
 		names = append(names, n)
 	}
 	sort.Strings(names)
+
+	nb := hclwrite.NewBlock("locals", nil)
 	for _, name := range names {
-		newName := prefix + "_" + name
 		toks := rw.rewriteTokens(attrs[name].Expr().BuildTokens(nil))
-		nb.Body().SetAttributeRaw(newName, toks)
+		nb.Body().SetAttributeRaw(prefix+"_"+name, toks)
 	}
 	return nb
 }
 
-// cloneAndRewriteGeneric clones a block with rewriter applied to attributes
-// only (nested blocks are processed recursively).
-func cloneAndRewriteGeneric(b *hclwrite.Block, rw *rewriter) *hclwrite.Block {
-	nb := hclwrite.NewBlock(b.Type(), b.Labels())
-	copyBodyRewritten(b.Body(), nb.Body(), rw)
-	return nb
+// mutateGeneric applies the rewriter to a block's attributes/nested
+// blocks in place. Used for unknown block types (moved/import/check etc)
+// where we want to preserve everything verbatim except for token
+// substitutions inside attribute expressions.
+func mutateGeneric(b *hclwrite.Block, rw *rewriter) {
+	rewriteBodyInPlace(b.Body(), rw)
 }
 
 // rewriteBodyInPlace walks body and re-runs rw over every attribute
@@ -335,23 +372,3 @@ func rewriteBodyInPlace(body *hclwrite.Body, rw *rewriter) {
 	}
 }
 
-// copyBodyRewritten copies all attributes (with rewrite) and nested blocks
-// (recursively) from src to dst.
-func copyBodyRewritten(src, dst *hclwrite.Body, rw *rewriter) {
-	// Attributes: stable order.
-	attrs := src.Attributes()
-	names := make([]string, 0, len(attrs))
-	for n := range attrs {
-		names = append(names, n)
-	}
-	sort.Strings(names)
-	for _, name := range names {
-		toks := rw.rewriteTokens(attrs[name].Expr().BuildTokens(nil))
-		dst.SetAttributeRaw(name, toks)
-	}
-	for _, sub := range src.Blocks() {
-		nb := hclwrite.NewBlock(sub.Type(), sub.Labels())
-		copyBodyRewritten(sub.Body(), nb.Body(), rw)
-		dst.AppendBlock(nb)
-	}
-}

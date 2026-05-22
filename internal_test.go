@@ -12,13 +12,6 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestParentReferencesModules_NilModules exercises the early-return branch
-// for when the rewriter has no modules map at all.
-func TestParentReferencesModules_NilModules(t *testing.T) {
-	got := parentReferencesModules(&parsedFile{}, &rewriter{})
-	assert.Nil(t, got)
-}
-
 // TestFindAttrRange_Variants covers the per-branch behaviour of
 // findAttrRange when called with mismatching labels / missing attribute.
 func TestFindAttrRange_Variants(t *testing.T) {
@@ -221,7 +214,7 @@ func TestCloneAndRewriteResource_BadLabels(t *testing.T) {
 		}
 	}
 	require.NotNil(t, bad)
-	_, err = cloneAndRewriteResource(bad, "p", &moduleCall{}, &rewriter{}, files[0])
+	_, err = mutateResource(bad, "p", &moduleCall{}, &rewriter{}, files[0])
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unexpected resource block labels")
 }
