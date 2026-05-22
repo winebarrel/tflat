@@ -190,6 +190,177 @@ func TestFlatten_Nested(t *testing.T) {
 	assert.Contains(t, movedNorm, "to = aws_iam_role.outer_inner_role")
 }
 
+func TestFlatten_VarDefault(t *testing.T) {
+	// Module variable has a default; caller does not pass it.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/var_default"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	// var.name was substituted with the module's *default* value.
+	assert.Contains(t, mTF, `"default-name"`)
+	assert.NotContains(t, mTF, "var.name")
+}
+
+func TestFlatten_CountConflict(t *testing.T) {
+	// Module call has count and so does the inner resource — same diagnostic
+	// as the for_each conflict, but exercises the count branch.
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/count_conflict"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "both use repetition attributes")
+	assert.Contains(t, msg, "module call \"m\" has count")
+	assert.Contains(t, msg, "resource aws_s3_bucket.this has count")
+}
+
+func TestFlatten_OutputChain(t *testing.T) {
+	// b's output value is var.upstream_a, which the parent passed as
+	// module.a.id. After pass-1, b's outputs map still contains the raw
+	// module.a.id reference; the fixpoint loop in Flatten resolves it.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/chain"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mainTF, ok := files["main.tf"]
+	require.True(t, ok)
+	// module.b.derived_a -> (after chain resolution) aws_iam_role.a_r.id
+	assert.Contains(t, mainTF, "role       = aws_iam_role.a_r.id",
+		"resource ref must resolve through a -> b output chain")
+	// Active (non-comment) content must not reference any module.* address.
+	active := stripCommentLines(mainTF)
+	assert.NotContains(t, active, "module.")
+}
+
+func TestFlatten_NestedCount(t *testing.T) {
+	// Nested module call uses count; count must propagate to inner resources.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/nested_count"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	outerTF, ok := files["outer.tf"]
+	require.True(t, ok)
+	assert.Contains(t, outerTF, "resource \"aws_iam_role\" \"outer_inner_r\"")
+	assert.Contains(t, outerTF, "count = 2")
+}
+
+func TestFlatten_NestedMalformedModuleBlock(t *testing.T) {
+	// `module {}` (no label) inside a nested module dir must be silently
+	// skipped without affecting the rest of the flatten.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/nested_malformed"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	outerTF, ok := files["outer.tf"]
+	require.True(t, ok)
+	assert.Contains(t, outerTF, "resource \"aws_iam_role\" \"outer_r\"")
+}
+
+func TestFlatten_NestedMissingKey(t *testing.T) {
+	// A nested module call references a directory that isn't in
+	// modules.json. flattenCall must error with a useful message.
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/nested_missing"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), `module "outer.ghost" not found`)
+}
+
+func TestFlatten_NestedForEach(t *testing.T) {
+	// outer module's nested module call uses for_each; the for_each
+	// expression must propagate down to inner's resource.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/nested_foreach"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	outerTF, ok := files["outer.tf"]
+	require.True(t, ok)
+	assert.Contains(t, outerTF, "resource \"aws_iam_role\" \"outer_inner_r\"")
+	assert.Contains(t, outerTF, "for_each = toset([\"x\", \"y\"])")
+	assert.Contains(t, outerTF, "name     = each.value")
+}
+
+func TestFlatten_Locals(t *testing.T) {
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/locals"})
+	require.NoError(t, err)
+
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	// locals key renamed to m_full_name.
+	assert.Contains(t, mTF, "m_full_name = ")
+	// var.prefix substituted with the caller's literal "p".
+	assert.Contains(t, mTF, `"p"`)
+	// Resource still references the renamed local.
+	assert.Contains(t, mTF, "bucket = local.m_full_name")
+}
+
+func TestFlatten_GenericBlock(t *testing.T) {
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/check_block"})
+	require.NoError(t, err)
+
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	// `check "account"` block (unknown to our switch) is preserved verbatim
+	// with the rewriter applied to its assertion expression.
+	assert.Contains(t, mTF, `check "account"`)
+	assert.Contains(t, mTF, "data.aws_caller_identity.m_current.account_id")
+}
+
+func TestFlatten_SplitParent(t *testing.T) {
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/split_parent"})
+	require.NoError(t, err)
+
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+
+	// outputs.tf has no module block but references module.m.bucket_id,
+	// which must be rewritten via the second pass.
+	outputsTF, ok := files["outputs.tf"]
+	require.True(t, ok, "outputs.tf should be rewritten (files=%v)", keys(files))
+	assert.Contains(t, outputsTF, "aws_s3_bucket.m_this.id")
+	assert.NotContains(t, outputsTF, "module.m.bucket_id")
+
+	// standalone.tf had no module block and no module ref; it should be
+	// omitted from the result entirely.
+	_, hasStandalone := files["standalone.tf"]
+	assert.False(t, hasStandalone, "untouched files must not be re-emitted")
+}
+
+// stripCommentLines drops any line that begins (after leading whitespace)
+// with '#', so assertions about *active* content don't trip over the
+// commented-out original module block.
+func stripCommentLines(s string) string {
+	out := []string{}
+	for _, line := range strings.Split(s, "\n") {
+		t := strings.TrimLeft(line, " \t")
+		if strings.HasPrefix(t, "#") {
+			continue
+		}
+		out = append(out, line)
+	}
+	return strings.Join(out, "\n")
+}
+
 func keys(m map[string]string) []string {
 	out := make([]string, 0, len(m))
 	for k := range m {

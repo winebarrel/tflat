@@ -265,9 +265,7 @@ func cloneAndRewriteResource(b *hclwrite.Block, prefix string, mc *moduleCall, r
 		}
 	}
 
-	if err := copyBodyRewritten(b.Body(), nb.Body(), rw); err != nil {
-		return nil, err
-	}
+	copyBodyRewritten(b.Body(), nb.Body(), rw)
 	return nb, nil
 }
 
@@ -319,7 +317,7 @@ func cloneAndRewriteLocals(b *hclwrite.Block, prefix string, rw *rewriter) *hclw
 // only (nested blocks are processed recursively).
 func cloneAndRewriteGeneric(b *hclwrite.Block, rw *rewriter) *hclwrite.Block {
 	nb := hclwrite.NewBlock(b.Type(), b.Labels())
-	_ = copyBodyRewritten(b.Body(), nb.Body(), rw)
+	copyBodyRewritten(b.Body(), nb.Body(), rw)
 	return nb
 }
 
@@ -339,7 +337,7 @@ func rewriteBodyInPlace(body *hclwrite.Body, rw *rewriter) {
 
 // copyBodyRewritten copies all attributes (with rewrite) and nested blocks
 // (recursively) from src to dst.
-func copyBodyRewritten(src, dst *hclwrite.Body, rw *rewriter) error {
+func copyBodyRewritten(src, dst *hclwrite.Body, rw *rewriter) {
 	// Attributes: stable order.
 	attrs := src.Attributes()
 	names := make([]string, 0, len(attrs))
@@ -353,10 +351,7 @@ func copyBodyRewritten(src, dst *hclwrite.Body, rw *rewriter) error {
 	}
 	for _, sub := range src.Blocks() {
 		nb := hclwrite.NewBlock(sub.Type(), sub.Labels())
-		if err := copyBodyRewritten(sub.Body(), nb.Body(), rw); err != nil {
-			return err
-		}
+		copyBodyRewritten(sub.Body(), nb.Body(), rw)
 		dst.AppendBlock(nb)
 	}
-	return nil
 }

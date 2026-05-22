@@ -1,0 +1,3 @@
+module "ghost" {
+  source = "./ghost"
+}

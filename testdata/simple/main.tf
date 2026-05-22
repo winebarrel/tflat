@@ -1,5 +1,6 @@
 module "web" {
   source = "./modules/web"
+
   bucket = "my-bucket"
 }
 
