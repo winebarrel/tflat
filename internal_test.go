@@ -102,6 +102,13 @@ func TestPathInside(t *testing.T) {
 	assert.True(t, pathInside("/a/b", "/a/b/c"))
 	assert.False(t, pathInside("/a/b", "/a/bx"), "prefix-only must not match")
 	assert.False(t, pathInside("/a/b", "/a"))
+	assert.False(t, pathInside("/a/b", "/c/d"), "unrelated siblings")
+
+	// Filesystem root: a naive HasPrefix(child, parent+sep) check would
+	// build "//" and reject every absolute path. The Rel-based
+	// implementation handles this correctly.
+	assert.True(t, pathInside("/", "/foo"))
+	assert.True(t, pathInside("/", "/"))
 }
 
 // errWriter always errors; used to exercise WriteToStdout's error returns.

@@ -71,12 +71,19 @@ func (r *Result) WriteToDir(dir string) error {
 
 // pathInside reports whether child is the same as parent or sits below it.
 // Both paths must already be absolute and cleaned (filepath.Abs does both).
+//
+// Uses filepath.Rel so the filesystem root (parent == "/") is handled
+// correctly — a naive HasPrefix(child, parent+sep) would turn into
+// HasPrefix(child, "//") and reject every child of "/".
 func pathInside(parent, child string) bool {
-	if parent == child {
-		return true
+	rel, err := filepath.Rel(parent, child)
+	if err != nil {
+		return false
 	}
-	sep := string(filepath.Separator)
-	return strings.HasPrefix(child, parent+sep)
+	if rel == ".." {
+		return false
+	}
+	return !strings.HasPrefix(rel, ".."+string(filepath.Separator))
 }
 
 // WriteToStdout writes each file to w prefixed by a `# === path ===` banner
