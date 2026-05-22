@@ -173,6 +173,25 @@ func TestResult_WriteToDir_PreservesMode(t *testing.T) {
 		"new file does not inherit the existing file's special mode")
 }
 
+func TestResult_WriteToDir_RejectsAbsolutePath(t *testing.T) {
+	res := &tflat.Result{Files: []tflat.FileOutput{
+		{Path: "/etc/passwd", Content: []byte("x")},
+	}}
+	err := res.WriteToDir(t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "absolute path")
+}
+
+func TestResult_WriteToDir_RejectsEscapingPath(t *testing.T) {
+	// `../escape.tf` would resolve outside of the target dir.
+	res := &tflat.Result{Files: []tflat.FileOutput{
+		{Path: "../escape.tf", Content: []byte("x")},
+	}}
+	err := res.WriteToDir(t.TempDir())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "escapes target directory")
+}
+
 func TestResult_WriteToDir_NoWritablePath(t *testing.T) {
 	// If the target directory doesn't exist, WriteToDir surfaces the error
 	// (it does not silently swallow it).

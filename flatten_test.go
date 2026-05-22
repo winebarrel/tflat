@@ -505,6 +505,19 @@ func TestFlatten_DynamicBlock(t *testing.T) {
 		"ingress.value reference inside content is preserved")
 }
 
+func TestFlatten_ParentDuplicateAddress(t *testing.T) {
+	// Two parent files declare the same resource address. Terraform itself
+	// would reject this; tflat surfaces it up front rather than silently
+	// re-emitting both copies.
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/parent_dup"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, "declared twice in the parent")
+	assert.Contains(t, msg, "aws_s3_bucket.dup")
+	assert.Contains(t, msg, "extra.tf")
+	assert.Contains(t, msg, "main.tf")
+}
+
 func TestFlatten_AddressCollision(t *testing.T) {
 	// Parent already owns the address that the module's renamed resource
 	// would take. Must surface a diagnostic instead of silently producing

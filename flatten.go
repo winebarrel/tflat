@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sort"
+	"strings"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
@@ -36,18 +37,46 @@ type pendingCall struct {
 // WriteToDir writes each file in the result into dir using its relative
 // path. When overwriting an existing file the original permission bits
 // are preserved; new files are created with 0644.
+//
+// FileOutput.Path is treated as a relative path inside dir. Absolute
+// paths and paths that escape dir (via `..`) are rejected to prevent a
+// crafted Result from writing outside the target directory.
 func (r *Result) WriteToDir(dir string) error {
+	absDir, err := filepath.Abs(dir)
+	if err != nil {
+		return err
+	}
 	for _, f := range r.Files {
-		path := filepath.Join(dir, f.Path)
+		if filepath.IsAbs(f.Path) {
+			return fmt.Errorf("WriteToDir: refusing absolute path %q", f.Path)
+		}
+		path := filepath.Join(absDir, f.Path)
+		absPath, err := filepath.Abs(path)
+		if err != nil {
+			return err
+		}
+		if !pathInside(absDir, absPath) {
+			return fmt.Errorf("WriteToDir: path %q escapes target directory", f.Path)
+		}
 		mode := os.FileMode(0644)
-		if info, err := os.Stat(path); err == nil {
+		if info, err := os.Stat(absPath); err == nil {
 			mode = info.Mode().Perm()
 		}
-		if err := os.WriteFile(path, f.Content, mode); err != nil {
+		if err := os.WriteFile(absPath, f.Content, mode); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// pathInside reports whether child is the same as parent or sits below it.
+// Both paths must already be absolute and cleaned (filepath.Abs does both).
+func pathInside(parent, child string) bool {
+	if parent == child {
+		return true
+	}
+	sep := string(filepath.Separator)
+	return strings.HasPrefix(child, parent+sep)
 }
 
 // WriteToStdout writes each file to w prefixed by a `# === path ===` banner
@@ -341,7 +370,17 @@ func checkAddressCollisions(rootFiles []*parsedFile, pending []*pendingCall) err
 			if addr == "" {
 				continue
 			}
-			owner[addr] = "parent file " + pf.name
+			loc := "parent file " + pf.name
+			if prev, ok := owner[addr]; ok {
+				return fmt.Errorf(
+					"address %q is declared twice in the parent:\n"+
+						"  first occurrence: %s\n"+
+						"  second occurrence: %s\n"+
+						"  hint: terraform itself would reject this; tflat refuses to flatten until the duplicate is resolved",
+					addr, prev, loc,
+				)
+			}
+			owner[addr] = loc
 		}
 	}
 	for _, p := range pending {
