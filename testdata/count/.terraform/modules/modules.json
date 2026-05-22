@@ -1,0 +1,6 @@
+{
+  "Modules": [
+    { "Key": "", "Source": "", "Dir": "." },
+    { "Key": "web", "Source": "./modules/web", "Dir": "modules/web" }
+  ]
+}

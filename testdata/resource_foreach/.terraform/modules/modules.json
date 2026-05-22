@@ -1,0 +1,6 @@
+{
+  "Modules": [
+    { "Key": "", "Source": "", "Dir": "." },
+    { "Key": "rs", "Source": "./modules/rs", "Dir": "modules/rs" }
+  ]
+}
