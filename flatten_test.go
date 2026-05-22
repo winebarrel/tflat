@@ -507,27 +507,27 @@ func TestFlatten_DynamicBlock(t *testing.T) {
 
 func TestFlatten_ParentDuplicateAddress(t *testing.T) {
 	// Two parent files declare the same resource address. Terraform itself
-	// would reject this; tflat surfaces it up front rather than silently
-	// re-emitting both copies.
+	// would reject this; tflat surfaces it up front with both locations.
 	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/parent_dup"})
 	require.Error(t, err)
 	msg := err.Error()
 	assert.Contains(t, msg, "declared twice in the parent")
 	assert.Contains(t, msg, "aws_s3_bucket.dup")
-	assert.Contains(t, msg, "extra.tf")
-	assert.Contains(t, msg, "main.tf")
+	assert.Contains(t, msg, "testdata/parent_dup/extra.tf:3:1")
+	assert.Contains(t, msg, "testdata/parent_dup/main.tf:1:1")
 }
 
 func TestFlatten_AddressCollision(t *testing.T) {
 	// Parent already owns the address that the module's renamed resource
-	// would take. Must surface a diagnostic instead of silently producing
-	// duplicate-address output.
+	// would take. Must surface a diagnostic with both source locations.
 	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/collision"})
 	require.Error(t, err)
 	msg := err.Error()
 	assert.Contains(t, msg, `address "aws_s3_bucket.m_this" would collide`)
-	assert.Contains(t, msg, "parent file main.tf")
-	assert.Contains(t, msg, `module call "m"`)
+	assert.Contains(t, msg, "parent file main.tf at testdata/collision/main.tf:7:1",
+		"parent block's position must be reported")
+	assert.Contains(t, msg, `module call "m" at testdata/collision/main.tf:1:1`,
+		"module call's position must be reported")
 }
 
 func TestFlatten_EmptyModule(t *testing.T) {

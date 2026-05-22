@@ -356,11 +356,31 @@ func resourceAddr(b *hclwrite.Block) string {
 	return labels[0] + "." + labels[1]
 }
 
-// checkAddressCollisions scans every resource/data block that will exist in
-// the flattened project (parent files + inlined module bodies) and returns
-// an error if any two share the same Terraform address.
+// addrOwner records where a given resource/data address was declared so
+// collision diagnostics can point users at the actual source location.
+type addrOwner struct {
+	desc string    // e.g. `parent file main.tf` or `module call "m"`
+	loc  hcl.Range // source range; .Filename == "" if unknown
+}
+
+func (o addrOwner) String() string {
+	if o.loc.Filename != "" {
+		return o.desc + " at " + formatRange(o.loc)
+	}
+	return o.desc
+}
+
+// checkAddressCollisions scans every resource/data block that will exist
+// in the flattened project (parent files + inlined module bodies) and
+// returns an error if any two share the same Terraform address.
+//
+// Diagnostics include the source range of both colliding declarations.
+// For parent blocks the range points at the block header itself; for
+// module-supplied blocks we point at the module call (since the renamed
+// block no longer corresponds to a single named position in the module
+// body).
 func checkAddressCollisions(rootFiles []*parsedFile, pending []*pendingCall) error {
-	owner := map[string]string{} // addr -> human-readable source
+	owner := map[string]addrOwner{}
 	for _, pf := range rootFiles {
 		for _, b := range pf.file.Body().Blocks() {
 			if b.Type() != "resource" && b.Type() != "data" {
@@ -370,17 +390,20 @@ func checkAddressCollisions(rootFiles []*parsedFile, pending []*pendingCall) err
 			if addr == "" {
 				continue
 			}
-			loc := "parent file " + pf.name
+			entry := addrOwner{
+				desc: "parent file " + pf.name,
+				loc:  findBlockRange(pf, b.Type(), b.Labels()),
+			}
 			if prev, ok := owner[addr]; ok {
 				return fmt.Errorf(
 					"address %q is declared twice in the parent:\n"+
 						"  first occurrence: %s\n"+
 						"  second occurrence: %s\n"+
 						"  hint: terraform itself would reject this; tflat refuses to flatten until the duplicate is resolved",
-					addr, prev, loc,
+					addr, prev, entry,
 				)
 			}
-			owner[addr] = loc
+			owner[addr] = entry
 		}
 	}
 	for _, p := range pending {
@@ -392,16 +415,20 @@ func checkAddressCollisions(rootFiles []*parsedFile, pending []*pendingCall) err
 			if addr == "" {
 				continue
 			}
+			entry := addrOwner{
+				desc: fmt.Sprintf("module call %q", p.mc.name),
+				loc:  findBlockRange(p.mc.parentPF, "module", []string{p.mc.name}),
+			}
 			if prev, ok := owner[addr]; ok {
 				return fmt.Errorf(
 					"address %q would collide after flattening:\n"+
 						"  first occurrence: %s\n"+
-						"  second occurrence: module call %q\n"+
+						"  second occurrence: %s\n"+
 						"  hint: rename one of the resources to avoid the prefix-rename collision",
-					addr, prev, p.mc.name,
+					addr, prev, entry,
 				)
 			}
-			owner[addr] = "module call " + p.mc.name
+			owner[addr] = entry
 		}
 	}
 	return nil
