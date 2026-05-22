@@ -191,7 +191,7 @@ func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool) {
 	rb := rewritten.Body()
 	hasModule := false
 	for _, b := range pf.file.Body().Blocks() {
-		if b.Type() == "module" {
+		if b.Type() == "module" && len(b.Labels()) == 1 {
 			hasModule = true
 			// Insert a placeholder we will substitute with commented-out text.
 			marker := fmt.Sprintf("__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])
@@ -200,6 +200,9 @@ func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool) {
 			})
 			continue
 		}
+		// Non-module blocks, and malformed module blocks (zero or multiple
+		// labels — syntactically valid HCL but not real module calls), are
+		// copied through with attribute rewriting applied.
 		nb := hclwrite.NewBlock(b.Type(), b.Labels())
 		copyBodyRewritten(b.Body(), nb.Body(), rw)
 		rb.AppendBlock(nb)
@@ -215,7 +218,7 @@ func rewriteParentFile(pf *parsedFile, rw *rewriter) ([]byte, bool) {
 	finalBuf := bytes.NewBuffer(nil)
 	finalBuf.Write(formatted)
 	for _, b := range pf.file.Body().Blocks() {
-		if b.Type() != "module" {
+		if b.Type() != "module" || len(b.Labels()) != 1 {
 			continue
 		}
 		marker := fmt.Sprintf("#:__TFLAT_MODULE_BLOCK_%s__", b.Labels()[0])

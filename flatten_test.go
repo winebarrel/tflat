@@ -250,6 +250,21 @@ func TestFlatten_NestedCount(t *testing.T) {
 	assert.Contains(t, outerTF, "count = 2")
 }
 
+func TestFlatten_ParentMalformedModuleBlock(t *testing.T) {
+	// A parent file with a syntactically-valid `module {}` (no labels)
+	// next to a real module call must not panic and must still flatten
+	// the real one.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/parent_malformed"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	assert.Contains(t, mTF, "resource \"aws_iam_role\" \"m_r\"")
+}
+
 func TestFlatten_NestedMalformedModuleBlock(t *testing.T) {
 	// `module {}` (no label) inside a nested module dir must be silently
 	// skipped without affecting the rest of the flatten.
