@@ -84,16 +84,24 @@ func TestResourceAddr_BadLabels(t *testing.T) {
 }
 
 // TestCheckAddressCollisions_IgnoresMalformed verifies that malformed
-// resource blocks (wrong label count) are skipped by the collision check
-// rather than crashing it.
+// resource/data blocks (wrong label count) are skipped by the collision
+// check rather than crashing it.
 func TestCheckAddressCollisions_IgnoresMalformed(t *testing.T) {
 	tmp := t.TempDir()
-	// `resource "x" {}` has one label; the address-check loop must skip it.
 	require.NoError(t, os.WriteFile(filepath.Join(tmp, "x.tf"),
-		[]byte(`resource "x" {}`), 0644))
+		// One-label resource and a label-less data block: both have an
+		// empty resourceAddr() result and must be skipped.
+		[]byte("resource \"x\" {}\ndata {}\n"), 0644))
 	files, err := parseDir(tmp)
 	require.NoError(t, err)
 	require.NoError(t, checkAddressCollisions(files, nil))
+}
+
+func TestPathInside(t *testing.T) {
+	assert.True(t, pathInside("/a/b", "/a/b"), "identical paths are 'inside'")
+	assert.True(t, pathInside("/a/b", "/a/b/c"))
+	assert.False(t, pathInside("/a/b", "/a/bx"), "prefix-only must not match")
+	assert.False(t, pathInside("/a/b", "/a"))
 }
 
 // errWriter always errors; used to exercise WriteToStdout's error returns.
@@ -103,7 +111,33 @@ func (errWriter) Write(p []byte) (int, error) {
 	return 0, errBoom
 }
 
+// errAfterN succeeds on the first n writes and errors on the (n+1)th.
+// Used to walk past WriteToStdout's banner/content writes and reach the
+// per-iteration error branches that errWriter can't reach.
+type errAfterN struct{ remaining int }
+
+func (e *errAfterN) Write(p []byte) (int, error) {
+	if e.remaining <= 0 {
+		return 0, errBoom
+	}
+	e.remaining--
+	return len(p), nil
+}
+
 var errBoom = errors.New("boom")
+
+// TestResult_WriteToStdout_ErrorMidStream covers the Fprintln/Fprintf
+// error branches inside WriteToStdout that fire on the *second* file.
+func TestResult_WriteToStdout_ErrorMidStream(t *testing.T) {
+	res := &Result{Files: []FileOutput{
+		{Path: "a.tf", Content: []byte("a")},
+		{Path: "b.tf", Content: []byte("b")},
+	}}
+	// The first file needs: one banner Fprintf + one content Write = 2 ok
+	// writes. The Fprintln blank line between files is the 3rd write.
+	err := res.WriteToStdout(&errAfterN{remaining: 2})
+	require.Error(t, err)
+}
 
 // TestResult_WriteToStdout_WriterError covers the WriteToStdout error
 // branches. Passing a writer that always fails surfaces the first error

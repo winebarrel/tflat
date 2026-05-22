@@ -1,11 +1,14 @@
 package tflat
 
 import (
+	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/hashicorp/hcl/v2"
 	"github.com/hashicorp/hcl/v2/hclsyntax"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestLabelsMatch(t *testing.T) {
@@ -66,3 +69,25 @@ func TestFindBlockRangeIn_NotFound(t *testing.T) {
 // emptyBody is an empty hclsyntax body shared by tests above to avoid
 // re-parsing trivial source in every test case.
 var emptyBody = &hclsyntax.Body{}
+
+func TestFindBlockRange_TypeAndLabelMismatch(t *testing.T) {
+	// File with several top-level blocks; verify findBlockRange walks past
+	// the non-matching ones (covers the `continue` branches).
+	tmp := t.TempDir()
+	src := []byte(`resource "aws_s3_bucket" "this" { bucket = "x" }
+module "other" { source = "./x" }
+module "want"  { source = "./y" }
+`)
+	require.NoError(t, os.WriteFile(filepath.Join(tmp, "x.tf"), src, 0644))
+	files, err := parseDir(tmp)
+	require.NoError(t, err)
+	pf := files[0]
+
+	// Walks past `resource`, past `module "other"`, returns `module "want"`.
+	got := findBlockRange(pf, "module", []string{"want"})
+	assert.Equal(t, 3, got.Start.Line)
+
+	// All blocks scanned, none match labels -> empty range.
+	got = findBlockRange(pf, "module", []string{"nope"})
+	assert.Equal(t, hcl.Range{}, got)
+}
