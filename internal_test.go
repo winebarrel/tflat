@@ -144,6 +144,22 @@ func TestResult_WriteToStdout_ErrorMidStream(t *testing.T) {
 	// writes. The Fprintln blank line between files is the 3rd write.
 	err := res.WriteToStdout(&errAfterN{remaining: 2})
 	require.Error(t, err)
+
+	// Push further: succeed through the second file's banner Fprintf and
+	// fail at its content w.Write — covers the final error branch.
+	err = res.WriteToStdout(&errAfterN{remaining: 4})
+	require.Error(t, err)
+}
+
+func TestAddrOwnerString(t *testing.T) {
+	withLoc := addrOwner{
+		desc: "parent file main.tf",
+		loc:  hcl.Range{Filename: "main.tf", Start: hcl.Pos{Line: 3, Column: 1}},
+	}
+	assert.Equal(t, "parent file main.tf at main.tf:3:1", withLoc.String())
+
+	withoutLoc := addrOwner{desc: "parent file main.tf"}
+	assert.Equal(t, "parent file main.tf", withoutLoc.String())
 }
 
 // TestResult_WriteToStdout_WriterError covers the WriteToStdout error

@@ -537,6 +537,17 @@ func TestFlatten_ParentDuplicateAddress(t *testing.T) {
 	assert.Contains(t, msg, "testdata/parent_dup/main.tf:1:1")
 }
 
+func TestFlatten_DataAddressCollision(t *testing.T) {
+	// Same collision check but for `data` blocks (covers the `data.TYPE.NAME`
+	// branch in checkAddressCollisions).
+	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/data_collision"})
+	require.Error(t, err)
+	msg := err.Error()
+	assert.Contains(t, msg, `address "data.aws_caller_identity.m_current"`)
+	assert.Contains(t, msg, "parent file main.tf")
+	assert.Contains(t, msg, `module call "m"`)
+}
+
 func TestFlatten_AddressCollision(t *testing.T) {
 	// Parent already owns the address that the module's renamed resource
 	// would take. Must surface a diagnostic with both source locations.
