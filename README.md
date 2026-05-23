@@ -9,7 +9,7 @@
 ## Installation
 
 ```
-go install github.com/winebarrel/tflat/cmd/tflat@latest
+brew install winebarrel/tflat/tflat
 ```
 
 `terraform init` must have been run in the target directory so `tflat` can read `.terraform/modules/modules.json`.
