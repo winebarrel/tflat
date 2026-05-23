@@ -10,3 +10,16 @@ builds:
       - CGO_ENABLED=0
 checksum:
   name_template: "checksums.txt"
+homebrew_casks:
+  - repository:
+      owner: winebarrel
+      name: homebrew-tflat
+    homepage: https://github.com/winebarrel/tflat
+    description: Flatten Terraform modules into the parent with moved blocks for state migration.
+    license: MIT
+    hooks:
+      post:
+        install: |
+          if OS.mac?
+            system_command "/usr/bin/xattr", args: ["-dr", "com.apple.quarantine", "#{staged_path}/tflat"]
+          end
