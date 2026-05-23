@@ -577,9 +577,12 @@ func TestFlatten_DataSourceHasNoMovedEntry(t *testing.T) {
 	movedNorm := strings.Join(strings.Fields(moved), " ")
 	assert.Contains(t, movedNorm, "from = module.m.aws_iam_role.this")
 	assert.Contains(t, movedNorm, "to = aws_iam_role.m_this")
-	assert.NotContains(t, moved, "data.aws_iam_policy_document",
-		"data sources must not get moved entries")
-	assert.NotContains(t, moved, "data \"", "no data-address moved entries at all")
+	// Moved addresses are emitted as traversals (e.g.
+	// `module.m.data.aws_iam_policy_document.assume`), so any
+	// regression that re-introduces data-source moved entries would
+	// contain the `data.` segment in the traversal form.
+	assert.NotContains(t, movedNorm, "data.",
+		"data sources must not get moved entries (any type)")
 }
 
 func TestFlatten_EmptyModule(t *testing.T) {
