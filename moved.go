@@ -37,17 +37,16 @@ func collectMovedForCall(modulePath []string, moduleKey string, dirs map[string]
 	}
 	sort.Strings(addrs)
 	for _, addr := range addrs {
-		var from, to string
+		// Data sources are re-read on every plan and have no persistent
+		// state to migrate, so Terraform does not honor `moved` blocks
+		// for them. Skip to avoid emitting no-op (and in some versions
+		// invalid) entries.
 		if strings.HasPrefix(addr, "data.") {
-			// addr = "data.TYPE.NAME"
-			parts := strings.SplitN(addr, ".", 3)
-			from = modPrefix + "." + addr
-			to = "data." + parts[1] + "." + prefix + "_" + parts[2]
-		} else {
-			parts := strings.SplitN(addr, ".", 2)
-			from = modPrefix + "." + addr
-			to = parts[0] + "." + prefix + "_" + parts[1]
+			continue
 		}
+		parts := strings.SplitN(addr, ".", 2)
+		from := modPrefix + "." + addr
+		to := parts[0] + "." + prefix + "_" + parts[1]
 		entries = append(entries, movedEntry{from: from, to: to})
 	}
 
