@@ -561,6 +561,27 @@ func TestFlatten_AddressCollision(t *testing.T) {
 		"module call's position must be reported")
 }
 
+func TestFlatten_DataSourceHasNoMovedEntry(t *testing.T) {
+	// Terraform does not honor `moved` blocks for data sources: they
+	// are not stored in state and are re-read on every plan. The module
+	// here mixes a data source and a resource — only the resource must
+	// appear in moved.tf.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/data_no_moved"})
+	require.NoError(t, err)
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+	moved, ok := files["moved.tf"]
+	require.True(t, ok, "moved.tf should be present (files=%v)", keys(files))
+	movedNorm := strings.Join(strings.Fields(moved), " ")
+	assert.Contains(t, movedNorm, "from = module.m.aws_iam_role.this")
+	assert.Contains(t, movedNorm, "to = aws_iam_role.m_this")
+	assert.NotContains(t, moved, "data.aws_iam_policy_document",
+		"data sources must not get moved entries")
+	assert.NotContains(t, moved, "data \"", "no data-address moved entries at all")
+}
+
 func TestFlatten_EmptyModule(t *testing.T) {
 	// Module with no resources produces neither <name>.tf nor moved.tf.
 	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/empty_module"})
