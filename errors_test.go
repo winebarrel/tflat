@@ -166,9 +166,9 @@ func TestResult_WriteToDir_PreservesMode(t *testing.T) {
 
 	info, err = os.Stat(filepath.Join(tmp, "new.tf"))
 	require.NoError(t, err)
-	// The default mode 0644 is subject to umask too, so accept whatever
-	// 0644 turns into here — we just want the *existing* file's mode to
-	// have been honoured above.
+	// The default mode 0644 is subject to umask too. Accept whatever
+	// 0644 turns into here. The assertion above already covered that
+	// the existing file's mode was preserved.
 	assert.NotEqual(t, os.FileMode(0664), info.Mode().Perm(),
 		"new file does not inherit the existing file's special mode")
 }

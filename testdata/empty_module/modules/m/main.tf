@@ -1,5 +1,5 @@
-# Intentionally empty — only a variable so the module is non-trivially
-# parseable but contributes no resources.
+# Intentionally empty. Only a variable, so the module parses but
+# contributes no resources.
 variable "unused" {
   type    = string
   default = "x"

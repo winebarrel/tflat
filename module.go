@@ -12,9 +12,9 @@ import (
 	"github.com/hashicorp/hcl/v2/hclwrite"
 )
 
-// parsedFile is a parsed .tf file from a directory. We keep both an hclwrite
-// representation (for token-level rewriting) and an hclsyntax body (for source
-// position information used in diagnostics).
+// parsedFile is a parsed .tf file. It keeps an hclwrite representation for
+// token-level rewriting and an hclsyntax body for source position info
+// used in diagnostics.
 type parsedFile struct {
 	path   string // absolute path
 	name   string // base name (e.g. "main.tf")
@@ -27,14 +27,14 @@ type loadedModule struct {
 	dir   string
 	files []*parsedFile
 
-	// variables: name -> default expression tokens (nil if no default).
+	// variables maps name to default expression tokens (nil if no default).
 	variables map[string]hclwrite.Tokens
-	// outputs: name -> value expression tokens.
+	// outputs maps name to value expression tokens.
 	outputs map[string]hclwrite.Tokens
-	// resourceAddrs collected from blocks. Used to know what TYPE.NAME refs to
-	// rewrite. Includes "data." prefix for data sources.
+	// resourceAddrs lists the TYPE.NAME addresses declared in the module.
+	// Data sources are keyed with a "data." prefix.
 	resourceAddrs map[string]bool
-	// moduleCallNames lists nested module call names declared inside this dir.
+	// moduleCallNames lists nested module call names declared in this dir.
 	moduleCallNames []string
 }
 
@@ -53,7 +53,7 @@ func parseDir(dir string) ([]*parsedFile, error) {
 		if !strings.HasSuffix(name, ".tf") {
 			continue
 		}
-		// Skip override files; they are merge-style and complicate flattening.
+		// Override files use merge semantics and complicate flattening.
 		if strings.HasSuffix(name, "_override.tf") || name == "override.tf" {
 			return nil, fmt.Errorf("override files are not supported: %s", name)
 		}
@@ -78,8 +78,8 @@ func parseDir(dir string) ([]*parsedFile, error) {
 }
 
 // findAttrRange returns the source range of attrName inside a top-level
-// block of the given type whose labels match (prefix match: pass nil/empty
-// to skip the labels check). Returns an empty range if not found.
+// block of the given type whose labels match. Pass nil or empty labels to
+// skip the labels check. Returns an empty range if not found.
 func findAttrRange(pf *parsedFile, blockType string, labels []string, attrName string) hcl.Range {
 	if pf == nil || pf.syntax == nil {
 		return hcl.Range{}
@@ -99,8 +99,7 @@ func findAttrRange(pf *parsedFile, blockType string, labels []string, attrName s
 }
 
 // findBlockRange returns the source range of a top-level block with the
-// given type and labels (the block header range, e.g. `module "X"`).
-// Returns an empty range if not found.
+// given type and labels. Returns an empty range if not found.
 func findBlockRange(pf *parsedFile, blockType string, labels []string) hcl.Range {
 	if pf == nil || pf.syntax == nil {
 		return hcl.Range{}
@@ -118,8 +117,7 @@ func findBlockRange(pf *parsedFile, blockType string, labels []string) hcl.Range
 }
 
 // findBlockRangeIn searches multiple parsedFiles for the first matching
-// block. Used to point at variable declarations buried inside any of a
-// module's files.
+// block. Used to point at variable declarations in any of a module's files.
 func findBlockRangeIn(files []*parsedFile, blockType string, labels []string) hcl.Range {
 	for _, pf := range files {
 		if r := findBlockRange(pf, blockType, labels); r.Filename != "" {
@@ -141,7 +139,7 @@ func labelsMatch(a, b []string) bool {
 	return true
 }
 
-// formatRange renders a Range as "file:line:col" or just "file" if line is 0.
+// formatRange renders a Range as "file:line:col", or just "file" if line is 0.
 func formatRange(r hcl.Range) string {
 	if r.Filename == "" {
 		return "<unknown>"

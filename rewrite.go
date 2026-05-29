@@ -8,26 +8,27 @@ import (
 // rewriter applies token-level substitutions while scanning an expression's
 // token list. It is configured per-callsite to know:
 //   - which variable arguments to substitute (var.X)
-//   - which resource labels to rename (aws_foo.bar -> aws_foo.<prefix>_bar)
-//   - whether to substitute module.X.Y references (only on the parent side)
+//   - which resource labels to rename (aws_foo.bar to aws_foo.<prefix>_bar)
+//   - whether to substitute module.X.Y references (parent side only)
 type rewriter struct {
-	// vars holds substitution tokens for var.<name>. Missing => leave as-is.
+	// vars holds substitution tokens for var.<name>. Missing keys are
+	// left as-is.
 	vars map[string]hclwrite.Tokens
-	// resourceRename: addr "aws_foo.bar" -> new name "<prefix>_bar".
+	// resourceRename maps "aws_foo.bar" to the new name "<prefix>_bar".
 	resourceRename map[string]string
-	// localsRename: "foo" -> "<prefix>_foo" for local.<name>.
+	// localsRename maps "foo" to "<prefix>_foo" for local.<name>.
 	localsRename map[string]string
-	// modules: nested module.X.Y -> tokens. Only used in parent rewrite.
+	// modules maps nested "module.X.Y" to tokens. Parent rewrite only.
 	modules map[string]hclwrite.Tokens
 }
 
 // rewriteTokens returns a new token list with substitutions applied.
-// Substitutions look for these patterns in order:
+// Patterns checked in order:
 //
-//	var.NAME                       -> vars[NAME]
-//	module.NAME.OUT                -> modules["NAME.OUT"]
-//	module.NAME["k"].OUT           -> indexed form (not substituted; warn)
-//	TYPE.OLDNAME                   -> TYPE.NEWNAME (label rename only)
+//	var.NAME             -> vars[NAME]
+//	module.NAME.OUT      -> modules["NAME.OUT"]
+//	module.NAME["k"].OUT -> not substituted
+//	TYPE.OLDNAME         -> TYPE.NEWNAME (label rename only)
 func (r *rewriter) rewriteTokens(in hclwrite.Tokens) hclwrite.Tokens {
 	out := make(hclwrite.Tokens, 0, len(in))
 	i := 0
@@ -86,9 +87,9 @@ func (r *rewriter) rewriteTokens(in hclwrite.Tokens) hclwrite.Tokens {
 			}
 		}
 
-		// Try TYPE.OLDNAME rename. We do this on any Ident . Ident pair
-		// where the type (first ident) is not a keyword like "var" / "module"
-		// / "local" / "each" / "count" / "self" / "path" / "terraform" / "data".
+		// TYPE.OLDNAME rename. Match any Ident . Ident pair where the
+		// first ident is not a reserved root (var, module, local, each,
+		// count, self, path, terraform, data).
 		if r.resourceRename != nil && i+2 < len(in) &&
 			in[i].Type == hclsyntax.TokenIdent &&
 			isDot(in[i+1]) &&

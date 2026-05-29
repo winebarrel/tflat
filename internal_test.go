@@ -134,7 +134,7 @@ func (e *errAfterN) Write(p []byte) (int, error) {
 var errBoom = errors.New("boom")
 
 // TestResult_WriteToStdout_ErrorMidStream covers the Fprintln/Fprintf
-// error branches inside WriteToStdout that fire on the *second* file.
+// error branches inside WriteToStdout that fire on the second file.
 func TestResult_WriteToStdout_ErrorMidStream(t *testing.T) {
 	res := &Result{Files: []FileOutput{
 		{Path: "a.tf", Content: []byte("a")},
@@ -146,7 +146,7 @@ func TestResult_WriteToStdout_ErrorMidStream(t *testing.T) {
 	require.Error(t, err)
 
 	// Push further: succeed through the second file's banner Fprintf and
-	// fail at its content w.Write — covers the final error branch.
+	// fail at its content w.Write to cover the final error branch.
 	err = res.WriteToStdout(&errAfterN{remaining: 4})
 	require.Error(t, err)
 }
@@ -175,7 +175,7 @@ func TestResult_WriteToStdout_WriterError(t *testing.T) {
 }
 
 // TestCollectMovedForCall_LoadModuleError covers the loadModule error path
-// inside collectMovedForCall — reachable by pointing the dirs map at a
+// inside collectMovedForCall. Reachable by pointing the dirs map at a
 // directory that doesn't exist on disk.
 func TestCollectMovedForCall_LoadModuleError(t *testing.T) {
 	dirs := map[string]string{"x": filepath.Join(t.TempDir(), "nope")}
