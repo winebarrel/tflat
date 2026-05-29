@@ -15,8 +15,8 @@ func isDot(t *hclwrite.Token) bool {
 	return t.Type == hclsyntax.TokenDot
 }
 
-// tokensEqual compares two token sequences by type+bytes (ignoring spacing).
-// Used to detect fixpoint convergence when iteratively rewriting.
+// tokensEqual compares two token sequences by type and bytes, ignoring
+// spacing. Used to detect fixpoint convergence when iterating rewrites.
 func tokensEqual(a, b hclwrite.Tokens) bool {
 	if len(a) != len(b) {
 		return false
@@ -40,9 +40,8 @@ func cloneTokens(in hclwrite.Tokens) hclwrite.Tokens {
 	return out
 }
 
-// stripLeadingSpaces removes leading whitespace tokens (SpaceBefore on first
-// real token does the same visually, but for embedded substitution we want a
-// clean run).
+// stripLeadingSpaces zeroes the SpacesBefore on the first token so the
+// returned sequence has no leading whitespace when embedded.
 func stripLeadingSpaces(in hclwrite.Tokens) hclwrite.Tokens {
 	if len(in) == 0 {
 		return in
@@ -62,7 +61,7 @@ func dotToken() *hclwrite.Token {
 	return &hclwrite.Token{Type: hclsyntax.TokenDot, Bytes: []byte(".")}
 }
 
-// parenWrap wraps tokens with ( ... ) to keep precedence safe when embedded.
+// parenWrap wraps tokens with parens to keep precedence safe when embedded.
 func parenWrap(in hclwrite.Tokens) hclwrite.Tokens {
 	out := hclwrite.Tokens{
 		&hclwrite.Token{Type: hclsyntax.TokenOParen, Bytes: []byte("(")},
@@ -72,14 +71,15 @@ func parenWrap(in hclwrite.Tokens) hclwrite.Tokens {
 	return out
 }
 
-// isSimplePrimary reports whether tokens form a single literal/traversal that
-// does not need parenthesizing when substituted into a larger expression.
+// isSimplePrimary reports whether tokens form a single literal or
+// traversal that does not need parenthesizing when substituted into a
+// larger expression.
 func isSimplePrimary(in hclwrite.Tokens) bool {
-	// Trim leading/trailing whitespace-only tokens by looking at content only.
 	if len(in) == 0 {
 		return true
 	}
-	// Allow: a single literal/ident, possibly followed by `.Ident` or `["x"]` chains.
+	// Allow a single literal or ident, possibly with `.Ident` or `["x"]`
+	// chains.
 	i := 0
 	first := in[i]
 	switch first.Type {
@@ -91,7 +91,7 @@ func isSimplePrimary(in hclwrite.Tokens) bool {
 	default:
 		return false
 	}
-	// Easiest heuristic: no binary operators in the stream.
+	// Heuristic: no binary operators in the stream.
 	for _, t := range in {
 		switch t.Type {
 		case hclsyntax.TokenPlus, hclsyntax.TokenMinus, hclsyntax.TokenStar,
@@ -107,9 +107,9 @@ func isSimplePrimary(in hclwrite.Tokens) bool {
 	return true
 }
 
-// substituteForEmbed prepares replacement tokens for embedding into a larger
-// expression. Wraps with parens when the inner expression is not a simple
-// primary.
+// substituteForEmbed prepares replacement tokens for embedding into a
+// larger expression. Wraps with parens unless the inner expression is a
+// simple primary.
 func substituteForEmbed(in hclwrite.Tokens) hclwrite.Tokens {
 	clean := stripLeadingSpaces(cloneTokens(in))
 	if isSimplePrimary(clean) {

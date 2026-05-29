@@ -14,9 +14,9 @@ type movedEntry struct {
 	to   string // e.g. "aws_s3_bucket.web_this"
 }
 
-// collectMovedForCall produces moved entries for one (possibly nested) call.
-// modulePath is the chain of module names from root, e.g. ["web", "inner"].
-// dir is the module directory. dirs is the modules.json lookup.
+// collectMovedForCall produces moved entries for one call, including nested
+// calls. modulePath is the chain of module names from root, e.g.
+// ["web", "inner"]. dirs is the modules.json lookup.
 func collectMovedForCall(modulePath []string, moduleKey string, dirs map[string]string) ([]movedEntry, error) {
 	dir, ok := dirs[moduleKey]
 	if !ok {
@@ -38,8 +38,8 @@ func collectMovedForCall(modulePath []string, moduleKey string, dirs map[string]
 	sort.Strings(addrs)
 	for _, addr := range addrs {
 		// Data sources are re-read on every plan and have no persistent
-		// state to migrate, so Terraform does not honor `moved` blocks
-		// for them. Skip to avoid emitting no-op (and in some versions
+		// state to migrate. Terraform does not honor `moved` blocks for
+		// them, so skip to avoid emitting no-op (and in some versions
 		// invalid) entries.
 		if strings.HasPrefix(addr, "data.") {
 			continue

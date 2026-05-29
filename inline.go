@@ -8,10 +8,9 @@ import (
 	"github.com/hashicorp/hcl/v2/hclwrite"
 )
 
-// moduleCall captures everything we need from a single `module "X" {}` block
-// in the parent. Some attributes (source/version/count/for_each/providers/
-// depends_on) are not user variable values and must be stripped from the args
-// map.
+// moduleCall captures a single `module "X" {}` block in the parent.
+// Attributes like source, version, count, for_each, providers, and
+// depends_on are not user variable values and are stripped from args.
 type moduleCall struct {
 	name     string
 	args     map[string]hclwrite.Tokens // user-provided variable bindings
@@ -67,26 +66,26 @@ func extractModuleCalls(pf *parsedFile) []*moduleCall {
 }
 
 // flattened is the result of expanding a single module call. The blocks are
-// ready to be written as a new file; outputs are the rewritten output value
-// expressions, indexed by output name, for the parent to substitute.
+// ready to be written as a new file. outputs maps output name to the
+// rewritten value expression, used by the parent for substitution.
 type flattened struct {
 	blocks  []*hclwrite.Block
 	outputs map[string]hclwrite.Tokens
 }
 
-// flattenCall fully expands a module call (recursively for nested module
-// calls). prefix is the address prefix to apply to resource/locals names
-// (e.g. "web" or "web_inner"). moduleKey is the dotted key used to look up
-// the module's directory in modules.json.
+// flattenCall expands a module call, recursing into nested calls. prefix is
+// the address prefix for resource and locals names (e.g. "web" or
+// "web_inner"). moduleKey is the dotted key used to look up the module's
+// directory in modules.json.
 func flattenCall(
 	mc *moduleCall,
 	prefix string,
 	moduleKey string,
 	dirs map[string]string,
 ) (*flattened, error) {
-	// A module call may not legitimately declare both count and for_each.
-	// Terraform would reject it, but we should not silently propagate both
-	// onto the inlined resources.
+	// A module call cannot declare both count and for_each. Terraform
+	// would reject it, and propagating both onto inlined resources would
+	// be silently wrong.
 	if mc.count != nil && mc.forEach != nil {
 		return nil, fmt.Errorf(
 			"module call %q declares both count and for_each (mutually exclusive) at %s",
@@ -103,11 +102,11 @@ func flattenCall(
 		return nil, err
 	}
 
-	// Build var substitution map: caller args override, else module's
-	// default. A variable that is required (no default) AND not provided by
-	// the caller is a hard error — silently leaving `var.X` in the output
-	// would produce a broken Terraform configuration that only fails at
-	// `terraform plan` time with a less actionable message.
+	// Build var substitution map: caller args override, else the module's
+	// default. A required variable (no default) that the caller did not
+	// supply is a hard error. Leaving `var.X` in the output would produce
+	// a broken Terraform config that only fails at plan time with a less
+	// actionable message.
 	vars := map[string]hclwrite.Tokens{}
 	// Iterate variables in sorted name order so the "required variable
 	// missing" diagnostic is deterministic when more than one is absent.
@@ -134,10 +133,10 @@ func flattenCall(
 		}
 	}
 
-	// Build resource-rename / locals-rename maps for this module's *own*
-	// resources and locals up front: we need them to rewrite nested-module
-	// call arguments (which may reference siblings inside the same module
-	// scope) before recursing.
+	// Build resource-rename and locals-rename maps for this module's own
+	// resources and locals. They are needed up front so we can rewrite
+	// nested-module call arguments (which may reference siblings inside
+	// the same module scope) before recursing.
 	resourceRename := map[string]string{}
 	for addr := range lm.resourceAddrs {
 		parts := strings.Split(addr, ".")
@@ -163,10 +162,9 @@ func flattenCall(
 		}
 	}
 
-	// Scope rewriter for this module (without nested-module outputs yet,
-	// which we'll fill in as we recurse). Used to resolve var/local/resource
-	// references inside nested-module call arguments before passing them
-	// down.
+	// Scope rewriter for this module. Nested-module outputs are filled
+	// in as we recurse. Used to resolve var/local/resource references
+	// inside nested-module call arguments before passing them down.
 	nestedOutputs := map[string]hclwrite.Tokens{}
 	scope := &rewriter{
 		vars:           vars,
@@ -175,9 +173,8 @@ func flattenCall(
 		modules:        nestedOutputs,
 	}
 
-	// First: recursively flatten nested module calls inside this module.
-	// We need their outputs to rewrite module.X.Y references inside the
-	// current module's blocks.
+	// Recursively flatten nested module calls. Their outputs are needed
+	// to rewrite module.X.Y references inside the current module's blocks.
 	var nestedBlocks []*hclwrite.Block
 
 	for _, pf := range lm.files {
@@ -196,9 +193,9 @@ func flattenCall(
 				parentPF: pf,
 			}
 			for name, attr := range b.Body().Attributes() {
-				// Resolve the arg expression through the *parent* module's
-				// scope (var.X -> caller's value, local.X -> renamed,
-				// resource refs -> prefixed) before passing down.
+				// Resolve the arg expression through the parent module's
+				// scope (var.X to caller's value, local.X to renamed name,
+				// resource refs to prefixed names) before passing down.
 				toks := scope.rewriteTokens(attr.Expr().BuildTokens(nil))
 				switch name {
 				case "count":
@@ -224,11 +221,11 @@ func flattenCall(
 		}
 	}
 
-	// At this point scope.modules has been mutated to contain all nested
-	// outputs; reuse it as the final rewriter for this module's blocks.
+	// scope.modules now contains all nested outputs; reuse it as the
+	// final rewriter for this module's blocks.
 	rw := scope
 
-	// Now walk the module's blocks and emit transformed copies.
+	// Walk the module's blocks and emit transformed copies.
 	var out []*hclwrite.Block
 	for _, pf := range lm.files {
 		for _, b := range pf.file.Body().Blocks() {
@@ -247,7 +244,7 @@ func flattenCall(
 				nb := mutateLocals(b, prefix, rw)
 				out = append(out, nb)
 			default:
-				// e.g. "moved", "import", "check" -- mutate in place with
+				// e.g. "moved", "import", "check": mutate in place with
 				// the rewriter applied.
 				mutateGeneric(b, rw)
 				out = append(out, b)
@@ -266,21 +263,20 @@ func flattenCall(
 }
 
 // mutateResource renames the second label, propagates the caller's
-// count/for_each if any, and rewrites all attribute expressions IN PLACE
-// on b. This preserves source ordering (including comments inside the
-// block) which a clone-then-rebuild approach would destroy.
+// count/for_each if any, and rewrites all attribute expressions in place
+// on b. This preserves source ordering (and comments inside the block)
+// that a clone-then-rebuild approach would lose.
 //
-// Because loadModule re-parses the module directory on every call, the
-// parsed file we are mutating is private to this flattenCall — no other
-// caller is observing it.
+// loadModule re-parses the module directory on every call, so the parsed
+// file being mutated is private to this flattenCall.
 func mutateResource(b *hclwrite.Block, prefix string, mc *moduleCall, rw *rewriter, pf *parsedFile) (*hclwrite.Block, error) {
 	labels := b.Labels()
 	if len(labels) != 2 {
 		return nil, fmt.Errorf("unexpected %s block labels: %v", b.Type(), labels)
 	}
 
-	// Conflict check before any mutation so we don't leave the block in a
-	// half-rewritten state on error.
+	// Conflict check before any mutation, so an error does not leave the
+	// block half-rewritten.
 	if mc.count != nil || mc.forEach != nil {
 		if b.Body().GetAttribute("count") != nil {
 			return nil, conflictError("count", b.Type(), labels, mc, pf)
@@ -293,11 +289,10 @@ func mutateResource(b *hclwrite.Block, prefix string, mc *moduleCall, rw *rewrit
 	// Rename second label.
 	b.SetLabels([]string{labels[0], prefix + "_" + labels[1]})
 
-	// Propagate count/for_each. SetAttributeRaw on a new name appends at the
-	// end of the body, which is the best we can do without low-level token
-	// manipulation; the conventional "top of resource" placement is lost
-	// for these propagated attributes but the body's overall ordering is
-	// otherwise preserved.
+	// Propagate count/for_each. SetAttributeRaw on a new name appends at
+	// the end of the body. The conventional top-of-resource placement is
+	// lost for propagated attributes; the rest of the body's ordering is
+	// preserved.
 	if mc.count != nil {
 		b.Body().SetAttributeRaw("count", cloneTokens(mc.count))
 	}
@@ -310,9 +305,8 @@ func mutateResource(b *hclwrite.Block, prefix string, mc *moduleCall, rw *rewrit
 	return b, nil
 }
 
-// conflictError builds a diagnostic-style message showing both the module
-// call's repetition attribute and the resource's, with file:line:col so the
-// user can find the two places to edit.
+// conflictError builds a diagnostic message showing both the module call's
+// repetition attribute and the resource's, with file:line:col for each.
 func conflictError(attrName, blockType string, labels []string, mc *moduleCall, resPF *parsedFile) error {
 	resRange := findAttrRange(resPF, blockType, labels, attrName)
 	// The module call's offending attr is either "count" or "for_each";
@@ -338,10 +332,10 @@ func conflictError(attrName, blockType string, labels []string, mc *moduleCall, 
 // mutateLocals renames each attribute key in a locals block to its
 // prefixed form and rewrites the attribute expressions.
 //
-// hclwrite has no in-place rename for attribute names, so we re-emit the
-// body via SetAttributeRaw. This loses the original attribute *order* and
-// any comments inside the locals block — an accepted limitation for this
-// block type. (Names are deterministic via sort to keep output stable.)
+// hclwrite has no in-place rename for attribute names, so the body is
+// re-emitted via SetAttributeRaw. This loses the original attribute order
+// and any comments inside the locals block. Names are sorted to keep
+// output stable.
 func mutateLocals(b *hclwrite.Block, prefix string, rw *rewriter) *hclwrite.Block {
 	attrs := b.Body().Attributes()
 	names := make([]string, 0, len(attrs))
@@ -358,18 +352,18 @@ func mutateLocals(b *hclwrite.Block, prefix string, rw *rewriter) *hclwrite.Bloc
 	return nb
 }
 
-// mutateGeneric applies the rewriter to a block's attributes/nested
-// blocks in place. Used for unknown block types (moved/import/check etc)
-// where we want to preserve everything verbatim except for token
-// substitutions inside attribute expressions.
+// mutateGeneric applies the rewriter to a block's attributes and nested
+// blocks in place. Used for unknown block types (moved, import, check)
+// where everything is preserved verbatim except for token substitutions
+// inside attribute expressions.
 func mutateGeneric(b *hclwrite.Block, rw *rewriter) {
 	rewriteBodyInPlace(b.Body(), rw)
 }
 
 // rewriteBodyInPlace walks body and re-runs rw over every attribute
-// expression, mutating the body. Use this for a second-pass rewrite after a
-// block has already been produced (e.g. to resolve cross-module references
-// that weren't known when the block was originally emitted).
+// expression, mutating the body. Used for a second-pass rewrite after a
+// block has been produced, e.g. to resolve cross-module references that
+// were not known when the block was first emitted.
 func rewriteBodyInPlace(body *hclwrite.Body, rw *rewriter) {
 	for name, attr := range body.Attributes() {
 		toks := rw.rewriteTokens(attr.Expr().BuildTokens(nil))

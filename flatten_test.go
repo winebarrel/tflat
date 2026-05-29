@@ -145,9 +145,9 @@ func TestFlatten_ResourceForEach(t *testing.T) {
 }
 
 func TestFlatten_BothForEach_Error(t *testing.T) {
-	// Both the module call AND the resource use for_each. This cannot be
-	// expressed as a single Terraform resource (count+for_each forbidden,
-	// for_each cannot be 2-D), so we surface a clear error.
+	// Both the module call and the resource use for_each. This cannot be
+	// expressed as a single Terraform resource (count and for_each are
+	// mutually exclusive, and for_each cannot be 2-D), so we error out.
 	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/both_foreach"})
 	require.Error(t, err)
 	msg := err.Error()
@@ -200,14 +200,14 @@ func TestFlatten_VarDefault(t *testing.T) {
 	}
 	mTF, ok := files["m.tf"]
 	require.True(t, ok)
-	// var.name was substituted with the module's *default* value.
+	// var.name was substituted with the module's default value.
 	assert.Contains(t, mTF, `"default-name"`)
 	assert.NotContains(t, mTF, "var.name")
 }
 
 func TestFlatten_CountConflict(t *testing.T) {
-	// Module call has count and so does the inner resource — same diagnostic
-	// as the for_each conflict, but exercises the count branch.
+	// Module call has count and so does the inner resource. Same
+	// diagnostic as the for_each conflict, exercising the count branch.
 	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/count_conflict"})
 	require.Error(t, err)
 	msg := err.Error()
@@ -471,8 +471,9 @@ func TestFlatten_SharedSource(t *testing.T) {
 }
 
 func TestFlatten_ProviderInModuleStripped(t *testing.T) {
-	// `terraform` and `provider` blocks inside the module must NOT be
-	// copied into the flattened output (they would duplicate root config).
+	// `terraform` and `provider` blocks inside the module must not be
+	// copied into the flattened output, since they would duplicate the
+	// root config.
 	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/provider_in_module"})
 	require.NoError(t, err)
 	files := map[string]string{}
@@ -507,7 +508,7 @@ func TestFlatten_DynamicBlock(t *testing.T) {
 
 func TestFlatten_ParentDuplicateAddress_SameFile(t *testing.T) {
 	// Both occurrences are in the same file. Each must report its own
-	// line — not point at the first match twice.
+	// line, not point at the first match twice.
 	_, err := tflat.Flatten(&tflat.Options{Dir: "testdata/parent_dup_same_file"})
 	require.Error(t, err)
 	msg := err.Error()
@@ -562,9 +563,9 @@ func TestFlatten_AddressCollision(t *testing.T) {
 }
 
 func TestFlatten_DataSourceHasNoMovedEntry(t *testing.T) {
-	// Terraform does not honor `moved` blocks for data sources: they
+	// Terraform does not honor `moved` blocks for data sources. They
 	// are not stored in state and are re-read on every plan. The module
-	// here mixes a data source and a resource — only the resource must
+	// here mixes a data source and a resource; only the resource must
 	// appear in moved.tf.
 	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/data_no_moved"})
 	require.NoError(t, err)
@@ -639,7 +640,7 @@ func TestFlatten_MetaArgsIgnored(t *testing.T) {
 }
 
 // stripCommentLines drops any line that begins (after leading whitespace)
-// with '#', so assertions about *active* content don't trip over the
+// with '#', so assertions about active content don't trip over the
 // commented-out original module block.
 func stripCommentLines(s string) string {
 	out := []string{}
