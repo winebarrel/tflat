@@ -232,6 +232,11 @@ func flattenCall(
 			switch b.Type() {
 			case "variable", "output", "terraform", "provider":
 				continue
+			case "import", "moved", "removed":
+				// State-migration blocks reference the module's internal
+				// addresses, which no longer exist at the parent level
+				// after flattening. Drop them.
+				continue
 			case "module":
 				continue // handled via nestedBlocks
 			case "resource", "data":
@@ -244,8 +249,7 @@ func flattenCall(
 				nb := mutateLocals(b, prefix, rw)
 				out = append(out, nb)
 			default:
-				// e.g. "moved", "import", "check": mutate in place with
-				// the rewriter applied.
+				// e.g. "check": apply the rewriter in place.
 				mutateGeneric(b, rw)
 				out = append(out, b)
 			}

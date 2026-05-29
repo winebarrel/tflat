@@ -339,6 +339,33 @@ func TestFlatten_GenericBlock(t *testing.T) {
 	assert.Contains(t, mTF, "data.aws_caller_identity.m_current.account_id")
 }
 
+func TestFlatten_StateBlocksInModuleDropped(t *testing.T) {
+	// import, moved, and removed blocks inside a module reference the
+	// module's internal addresses. After flattening, those addresses no
+	// longer exist at the parent level, so the blocks are dropped.
+	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/module_state_blocks"})
+	require.NoError(t, err)
+
+	files := map[string]string{}
+	for _, f := range res.Files {
+		files[f.Path] = string(f.Content)
+	}
+
+	mTF, ok := files["m.tf"]
+	require.True(t, ok)
+	assert.Contains(t, mTF, "resource \"aws_iam_role\" \"m_this\"")
+	assert.NotContains(t, mTF, "import {")
+	assert.NotContains(t, mTF, "moved {")
+	assert.NotContains(t, mTF, "removed {")
+
+	// tflat still emits its own moved.tf for the prefix rename.
+	moved, ok := files["moved.tf"]
+	require.True(t, ok)
+	movedNorm := strings.Join(strings.Fields(moved), " ")
+	assert.Contains(t, movedNorm, "from = module.m.aws_iam_role.this")
+	assert.Contains(t, movedNorm, "to = aws_iam_role.m_this")
+}
+
 func TestFlatten_SplitParent(t *testing.T) {
 	res, err := tflat.Flatten(&tflat.Options{Dir: "testdata/split_parent"})
 	require.NoError(t, err)
